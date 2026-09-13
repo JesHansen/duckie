@@ -63,4 +63,10 @@ cargo test --workspace
 
 Tests use deterministic loopback servers. They cover transport semantics, compressed-body limits, secret resolution, collection conflicts/recovery, import conversion, native UI rendering, real worker IPC, cancellation, and allocation failure. Two end-to-end tests need Node.js on `PATH`: they start `scripts/dev-server.mjs` on an ephemeral port and drive the shipped `examples/local-api` collection and the protected OpenAPI import all the way through send and assertion evaluation. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the remaining v1 work and [PERFORMANCE.md](PERFORMANCE.md) for measurements and release gates.
 
-The UI uses [eframe/egui](https://docs.rs/eframe/0.36.2/eframe/); assertions use [rquickjs](https://docs.rs/rquickjs/0.13.0/rquickjs/). Dependencies are fixed by `Cargo.lock`. An application license has not been selected; no public-distribution license is inferred. Packaging gathers dependency metadata and available license notices for review.
+The UI uses [eframe/egui](https://docs.rs/eframe/0.36.2/eframe/); assertions use [rquickjs](https://docs.rs/rquickjs/0.13.0/rquickjs/). Dependencies are fixed by `Cargo.lock`. Packaging gathers dependency metadata and available license notices into `THIRD_PARTY_NOTICES.md`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Every one of the 254 third-party crates linked into the binaries declares a permissive license, and none is copyleft. Where a crate offers a choice, Duckie takes the permissive option: `self_cell` is used under Apache-2.0 rather than GPL-2.0-only. `epaint_default_fonts` embeds typefaces under OFL-1.1 and the Ubuntu Font Licence, which allow redistribution inside an application but not sale of the fonts by themselves. Re-check `THIRD_PARTY_NOTICES.md` whenever `Cargo.lock` changes.

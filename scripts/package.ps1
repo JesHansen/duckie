@@ -19,7 +19,7 @@ try {
     foreach ($file in @('duckie.exe', 'duckie-test-worker.exe')) {
         Copy-Item -LiteralPath (Join-Path $root "target/release/$file") -Destination $destination -Force
     }
-    foreach ($file in @('README.md', 'IMPLEMENTATION_STATUS.md', 'PERFORMANCE.md')) {
+    foreach ($file in @('LICENSE', 'README.md', 'IMPLEMENTATION_STATUS.md', 'PERFORMANCE.md')) {
         Copy-Item -LiteralPath (Join-Path $root $file) -Destination $destination -Force
     }
     $metadataText = cargo metadata --format-version 1 --locked --filter-platform x86_64-pc-windows-msvc
@@ -27,7 +27,8 @@ try {
     $metadata = $metadataText | ConvertFrom-Json
     $notices = [System.Text.StringBuilder]::new()
     [void]$notices.AppendLine('# Third-party dependencies')
-    [void]$notices.AppendLine('Dependency metadata and available packaged license/notice files. Review before public redistribution.')
+    [void]$notices.AppendLine('Duckie itself is MIT licensed; see LICENSE. Below is the metadata and available license/notice files for every crate linked into these binaries.')
+    [void]$notices.AppendLine("`nWhere a crate offers a choice of licenses, Duckie takes the permissive option — notably Apache-2.0 for ``self_cell``, which is offered as Apache-2.0 OR GPL-2.0-only. ``epaint_default_fonts`` embeds typefaces under OFL-1.1 and the Ubuntu Font Licence, which permit redistribution inside an application but not sale of the fonts on their own. Re-run this script and re-read this file whenever Cargo.lock changes.")
     foreach ($package in ($metadata.packages | Where-Object { $_.source } | Sort-Object name, version)) {
         [void]$notices.AppendLine("`n## $($package.name) $($package.version)")
         [void]$notices.AppendLine("License expression: $($package.license)")

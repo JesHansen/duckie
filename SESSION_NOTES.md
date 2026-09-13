@@ -6,6 +6,7 @@ After you have read all relevant files here in the repo root, you may continue a
 
 - Build Duckie v1 from ARCHITECTURE.md and UI_DESIGN.md.
 - The user explicitly relaxed the initial memory requirement: **keep v1 below 500 MB**. Treat 500,000,000 bytes as the conservative ceiling. The original 80 MiB proposal is no longer the v1 requirement.
+- The project is **MIT licensed** (decided 13 September 2026), copyright Jes Bak Hansen. Dependency licenses were reviewed then: all 254 linked crates are permissive, none copyleft.
 - Token economy is at a premium. Act as an orchestrator and make heavy use of sub agents for implementation, if this saves on token cost / leaves more of my 5h window usable. For regular implementation tasks, spawn a Sonnet agent, for harder tasks implement them yourself without delegating to a sub agent.
 
 ## Current state
@@ -13,7 +14,7 @@ After you have read all relevant files here in the repo root, you may continue a
 - Eight-crate Rust desktop workspace in `crates/`, with Cargo.lock. The original design documents remain unmodified.
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` all pass. **42 tests**, up from 24 at the previous checkpoint.
 - `dist/Duckie-0.1.0-windows-x64.zip` (6,303,547 bytes) was produced by `scripts/package.ps1` from a clean `--release --locked` build without the screenshot feature. Desktop 13,111,808 bytes; worker 1,401,856 bytes.
-- No git repository was initialized and no commit was made. No public API request was made; all transport tests use loopback servers.
+- The repository was initialized on `main` and the work committed. No remote is configured and nothing has been pushed. No public API request was made; all transport tests use loopback servers.
 
 ## What this session changed
 
@@ -31,7 +32,7 @@ After you have read all relevant files here in the repo root, you may continue a
 2. Remaining editor polish: bracket pairing and incremental syntax colors, F6 region traversal, and **grouped/collapsible sidebar folders with user ordering**. The sidebar is a virtualized flat list (`show_rows`, uniform 38 px); grouping means flattening to a display list of header and request entries so virtualization survives, plus a collapsed-folder set in `Duckie`.
 3. Remaining OpenAPI work: relative and remote references, object parameters (`deepObject`, exploded `form` objects), `label`/`matrix` path styles, richer media handling and reimport diffs. Keep the existing rule — unsupported cases stay blocked rather than guessed.
 4. Re-measure memory and startup: the PERFORMANCE.md samples predate this session's changes.
-5. The app's license is still undecided, and the ZIP has not been tried on a clean Windows machine without a toolchain.
+5. The ZIP has not been tried on a clean Windows machine without a toolchain, and is unsigned.
 
 ## Implementation cautions
 
