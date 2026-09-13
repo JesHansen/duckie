@@ -23,7 +23,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/large') {
     const bytes = Math.min(60 * 1024 * 1024, Math.max(1, Number(url.searchParams.get('bytes') || 4 * 1024 * 1024)));
+    // `lines=true` breaks the payload into 80-column rows; single-line and multi-line bodies
+    // cost very different amounts to lay out, and the benchmark protocol wants both shapes.
     const body = Buffer.alloc(bytes, 97);
+    if (url.searchParams.get('lines') === 'true') for (let i = 79; i < bytes; i += 80) body[i] = 10;
     const gzip = url.searchParams.get('gzip') === 'true';
     res.writeHead(200, { 'content-type': 'text/plain', ...(gzip ? { 'content-encoding': 'gzip' } : {}) });
     res.end(gzip ? gzipSync(body) : body); return;

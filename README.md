@@ -27,6 +27,8 @@ node scripts/dev-server.mjs
 
 Then open the `examples/local-api` collection in Duckie, or import `examples/openapi.json`. The server binds only to `127.0.0.1:8787`. It has echo, error-status, redirect, delayed, and compressed-response endpoints. The protected OpenAPI URL is `http://127.0.0.1:8787/protected/openapi.json`; its illustrative development token is `duckie-local-demo`.
 
+`node scripts/make-fixtures.mjs` generates the fixtures the performance targets in [ARCHITECTURE.md](ARCHITECTURE.md#9-performance-acceptance-targets) call for: a 1,000-request collection, a 10,000-request stress collection, and a 10+ MiB OpenAPI document, all under `fixtures/` (gitignored). Output is deterministic, so re-running it for a benchmark pass produces byte-identical fixtures.
+
 ## Local files and secrets
 
 A collection contains `duckie.json`, `requests/`, `bodies/`, `tests/`, and `environments/`. Request IDs are stable; the manifest orders request-file references. JSON is UTF-8 with two-space indentation and LF endings. Save uses atomic file replacement, a recovery journal, and content-hash conflict checks. An external edit blocks overwrite; reload or save the draft into a new folder. Fields Duckie does not recognize are preserved through save and reload, and a document carrying a higher `schemaVersion` than this build writes refuses to open rather than being resaved without the parts it cannot read.
@@ -59,6 +61,13 @@ A failure reports the assertion message above the stack, and your test file eval
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
+
+Performance targets are measured separately, against release binaries built with the development `bench` feature:
+
+```powershell
+cargo build --workspace --release --features duckie-desktop/bench
+./scripts/benchmark.ps1
 ```
 
 Tests use deterministic loopback servers. They cover transport semantics, compressed-body limits, secret resolution, collection conflicts/recovery, import conversion, native UI rendering, real worker IPC, cancellation, and allocation failure. Two end-to-end tests need Node.js on `PATH`: they start `scripts/dev-server.mjs` on an ephemeral port and drive the shipped `examples/local-api` collection and the protected OpenAPI import all the way through send and assertion evaluation. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the remaining v1 work and [PERFORMANCE.md](PERFORMANCE.md) for measurements and release gates.

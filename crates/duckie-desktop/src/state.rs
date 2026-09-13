@@ -89,6 +89,8 @@ pub struct ImportUi {
     pub cancel: Option<CancellationToken>,
 }
 pub struct Duckie {
+    #[cfg(feature = "bench")]
+    pub bench: Option<crate::bench::Bench>,
     #[cfg(feature = "screenshot")]
     pub capture_frames: usize,
     pub ctx: egui::Context,
@@ -148,6 +150,8 @@ impl Duckie {
             .expect("Cannot initialize request runtime");
         let (io_tx, io_rx) = mpsc::channel(16);
         let mut app = Self {
+            #[cfg(feature = "bench")]
+            bench: crate::bench::Bench::from_env(),
             #[cfg(feature = "screenshot")]
             capture_frames: 0,
             ctx,
@@ -211,6 +215,12 @@ impl Duckie {
                 app.editor_find.query = "\"".into();
                 app.editor_find.open = true;
             }
+        }
+        // A measurement run must start from a known state, never from whatever collection the
+        // user last had open. `App::save` is also suppressed so a run cannot overwrite prefs.
+        #[cfg(feature = "bench")]
+        if app.bench.is_some() {
+            app.prefs.last_collection = None;
         }
         app.apply_theme();
         app.install_fonts();

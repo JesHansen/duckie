@@ -7,12 +7,14 @@ try {
         cargo build --workspace --release --locked
         if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
     }
-    # The development screenshot feature drives the GUI from environment variables and must never
-    # ship. -SkipBuild can otherwise package whatever a previous `--features screenshot` build left.
+    # The screenshot and bench features drive the GUI from environment variables and must never
+    # ship. -SkipBuild can otherwise package whatever a previous featured build left behind.
     $desktop = Join-Path $root 'target/release/duckie.exe'
     $image = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($desktop))
-    if ($image.Contains('DUCKIE_CAPTURE_PATH')) {
-        throw "$desktop was built with the screenshot feature. Rebuild without it before packaging."
+    foreach ($marker in @('DUCKIE_CAPTURE_PATH', 'DUCKIE_BENCH_PATH')) {
+        if ($image.Contains($marker)) {
+            throw "$desktop contains $marker, so it was built with a development feature. Rebuild without it before packaging."
+        }
     }
     $destination = Join-Path $root 'dist/Duckie-0.1.0-windows-x64'
     New-Item -ItemType Directory -Force -Path $destination | Out-Null

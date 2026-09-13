@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [features]
 screenshot = ["dep:image"]
+bench = ["dep:windows-sys"]
 
 [dependencies]
 duckie-model.workspace = true
@@ -27,3 +28,6 @@ tokio-util.workspace = true
 eframe = { version = "=0.36.2", default-features = false, features = ["glow", "accesskit", "default_fonts", "persistence"] }
 rfd = "=0.17.2"
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"], optional = true }

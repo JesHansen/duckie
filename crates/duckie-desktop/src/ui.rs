@@ -957,6 +957,10 @@ impl Duckie {
                             .get(self.response_find.index)
                             .map(|hit| hit.chars.clone());
                     }
+                    // Find sees only the loaded page, so say so rather than implying a whole-body count.
+                    if !self.response_find.query.is_empty() && view.result.body.len() > MIB {
+                        ui.weak("on this page");
+                    }
                     if ui.button("Copy").clicked() {
                         ui.ctx().copy_text(
                             if self.pretty {
@@ -1330,6 +1334,8 @@ impl eframe::App for Duckie {
             egui::CentralPanel::default().show(ui, |ui| self.response(ui));
         });
         self.dialogs(&ctx);
+        #[cfg(feature = "bench")]
+        self.bench_frame(&ctx);
         #[cfg(feature = "screenshot")]
         if let Ok(path) = std::env::var("DUCKIE_CAPTURE_PATH") {
             self.capture_frames += 1;
@@ -1361,6 +1367,10 @@ impl eframe::App for Duckie {
         }
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        #[cfg(feature = "bench")]
+        if self.bench.is_some() {
+            return;
+        }
         eframe::set_value(storage, "duckie-preferences", &self.prefs);
     }
     fn persist_egui_memory(&self) -> bool {

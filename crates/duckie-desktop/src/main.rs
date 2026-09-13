@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(feature = "bench")]
+mod bench;
 mod dialogs;
 mod editor;
 mod state;
