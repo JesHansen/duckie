@@ -83,6 +83,9 @@ pub struct Preferences {
     pub last_collection: Option<PathBuf>,
     pub sidebar: bool,
     pub appearance: u8,
+    /// Folder names the user has collapsed in the sidebar.
+    #[serde(default)]
+    pub collapsed: BTreeSet<String>,
 }
 #[derive(Clone, Copy)]
 pub enum Pending {

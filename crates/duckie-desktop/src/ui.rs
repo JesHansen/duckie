@@ -115,7 +115,88 @@ fn request_code(
     *focused |= result.focused;
     result.changed
 }
+/// One sidebar line. Headers and requests share a uniform height so the list stays virtualized
+/// by `show_rows`, which is what keeps a ten-thousand-request collection scrollable.
+enum SidebarRow {
+    Folder {
+        name: String,
+        count: usize,
+        collapsed: bool,
+    },
+    Request(usize),
+}
+/// The folder a request belongs to, with a name for those that declare none.
+fn folder_of(request: &RequestDefinition) -> &str {
+    let folder = request.folder.trim();
+    if folder.is_empty() {
+        "Ungrouped"
+    } else {
+        folder
+    }
+}
 impl Duckie {
+    /// Groups the visible requests under their folders, in first-appearance order, which is the
+    /// order the manifest stores and therefore the order the user controls.
+    fn sidebar_rows(&self) -> Vec<SidebarRow> {
+        let search = self.search.to_lowercase();
+        let mut groups: Vec<(&str, Vec<usize>)> = vec![];
+        let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, d) in self.drafts.iter().enumerate() {
+            let matches = search.is_empty()
+                || format!(
+                    "{} {} {} {}",
+                    d.request.name, d.request.method, d.request.url, d.request.folder
+                )
+                .to_lowercase()
+                .contains(&search);
+            if !matches {
+                continue;
+            }
+            let folder = folder_of(&d.request);
+            match index.get(folder) {
+                Some(at) => groups[*at].1.push(i),
+                None => {
+                    index.insert(folder, groups.len());
+                    groups.push((folder, vec![i]));
+                }
+            }
+        }
+        let mut rows = vec![];
+        for (name, items) in groups {
+            // A search has to reach into folders the user left closed, or matches would vanish.
+            let collapsed = search.is_empty() && self.prefs.collapsed.contains(name);
+            rows.push(SidebarRow::Folder {
+                name: name.to_owned(),
+                count: items.len(),
+                collapsed,
+            });
+            if !collapsed {
+                rows.extend(items.into_iter().map(SidebarRow::Request));
+            }
+        }
+        rows
+    }
+    /// Swaps a request with its neighbour inside the same folder, so reordering cannot silently
+    /// move it somewhere else. Saving writes the new order to the manifest.
+    fn reorder(&mut self, index: usize, up: bool) {
+        let folder = folder_of(&self.drafts[index].request).to_owned();
+        let neighbour = if up {
+            (0..index)
+                .rev()
+                .find(|i| folder_of(&self.drafts[*i].request) == folder)
+        } else {
+            (index + 1..self.drafts.len()).find(|i| folder_of(&self.drafts[*i].request) == folder)
+        };
+        let Some(neighbour) = neighbour else { return };
+        self.drafts.swap(index, neighbour);
+        if self.selected == index {
+            self.selected = neighbour;
+        } else if self.selected == neighbour {
+            self.selected = index;
+        }
+        // Order lives in the manifest, so the collection is now dirty even though no request is.
+        self.env_dirty = true;
+    }
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut as Shortcut, Modifiers};
         let pressed =
@@ -311,53 +392,88 @@ impl Duckie {
                 .desired_width(f32::INFINITY),
         );
         ui.add_space(4.0);
-        let search = self.search.to_lowercase();
-        let filtered: Vec<usize> = self
-            .drafts
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| {
-                format!(
-                    "{} {} {} {}",
-                    d.request.name, d.request.method, d.request.url, d.request.folder
-                )
-                .to_lowercase()
-                .contains(&search)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let rows = self.sidebar_rows();
+        let mut toggle = None;
+        let mut move_by = None;
         egui::ScrollArea::vertical()
             .id_salt("requests")
             .max_height((ui.available_height() - 125.0).max(100.0))
-            .show_rows(ui, 38.0, filtered.len(), |ui, range| {
-                for index in range {
-                    let i = filtered[index];
-                    let d = &self.drafts[i];
-                    let text = format!(
-                        "{:6} {}{}",
-                        d.request.method,
-                        d.request.name,
-                        if d.dirty { " *" } else { "" }
-                    );
-                    if ui
-                        .add_sized(
-                            [ui.available_width(), 32.0],
-                            egui::Button::selectable(
-                                self.selected == i,
-                                RichText::new(text).size(13.0),
-                            ),
-                        )
-                        .on_hover_text(format!("{}\n{}", d.request.folder, d.request.address()))
-                        .clicked()
-                    {
-                        self.selected = i;
-                        self.clock += 1;
-                        if let Some(v) = self.responses.get_mut(&self.drafts[i].request.id) {
-                            v.viewed = self.clock;
+            .show_rows(ui, 38.0, rows.len(), |ui, range| {
+                for row in &rows[range] {
+                    match row {
+                        SidebarRow::Folder {
+                            name,
+                            count,
+                            collapsed,
+                        } => {
+                            let label = format!(
+                                "{}  {name}  ({count})",
+                                if *collapsed { "▶" } else { "▼" }
+                            );
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 32.0],
+                                    egui::Button::new("")
+                                        .left_text(RichText::new(label).size(13.0).strong())
+                                        .frame(false),
+                                )
+                                .on_hover_text("Show or hide this folder")
+                                .clicked()
+                            {
+                                toggle = Some(name.clone());
+                            }
+                        }
+                        SidebarRow::Request(i) => {
+                            let i = *i;
+                            let d = &self.drafts[i];
+                            let text = format!(
+                                "    {:6} {}{}",
+                                d.request.method,
+                                d.request.name,
+                                if d.dirty { " *" } else { "" }
+                            );
+                            let response = ui
+                                .add_sized(
+                                    [ui.available_width(), 32.0],
+                                    egui::Button::selectable(self.selected == i, "")
+                                        .left_text(RichText::new(text).size(13.0)),
+                                )
+                                .on_hover_text(format!(
+                                    "{}\n{}",
+                                    d.request.folder,
+                                    d.request.address()
+                                ));
+                            response.context_menu(|ui| {
+                                if ui.button("Move up").clicked() {
+                                    move_by = Some((i, true));
+                                    ui.close();
+                                }
+                                if ui.button("Move down").clicked() {
+                                    move_by = Some((i, false));
+                                    ui.close();
+                                }
+                                ui.weak("Order is saved with the collection.");
+                            });
+                            if response.clicked() {
+                                self.selected = i;
+                                self.clock += 1;
+                                if let Some(v) = self.responses.get_mut(&self.drafts[i].request.id)
+                                {
+                                    v.viewed = self.clock;
+                                }
+                            }
                         }
                     }
                 }
             });
+        if let Some(name) = toggle
+            && !self.prefs.collapsed.remove(&name)
+        {
+            self.prefs.collapsed.insert(name);
+        }
+        if let Some((index, up)) = move_by {
+            self.reorder(index, up);
+        }
         ui.separator();
         if ui.button("Open collection…").clicked() {
             self.request_action(Pending::Open);
@@ -1440,6 +1556,72 @@ mod tests {
         assert!(app.drafts[0].dirty);
         assert!(app.responses.is_empty());
         assert!(!app.service.busy());
+    }
+    fn app_with(folders: &[&str]) -> (egui::Context, Duckie) {
+        let ctx = egui::Context::default();
+        let mut app = Duckie::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.drafts = folders
+            .iter()
+            .enumerate()
+            .map(|(i, folder)| Draft {
+                request: RequestDefinition {
+                    name: format!("r{i}"),
+                    folder: (*folder).into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        (ctx, app)
+    }
+    fn shape(app: &Duckie) -> Vec<String> {
+        app.sidebar_rows()
+            .iter()
+            .map(|row| match row {
+                SidebarRow::Folder {
+                    name,
+                    count,
+                    collapsed,
+                } => {
+                    format!(
+                        "[{name} {count}{}]",
+                        if *collapsed { " closed" } else { "" }
+                    )
+                }
+                SidebarRow::Request(i) => app.drafts[*i].request.name.clone(),
+            })
+            .collect()
+    }
+    #[test]
+    fn sidebar_groups_by_folder_in_first_appearance_order() {
+        let (_ctx, mut app) = app_with(&["B", "A", "B", ""]);
+        assert_eq!(
+            shape(&app),
+            ["[B 2]", "r0", "r2", "[A 1]", "r1", "[Ungrouped 1]", "r3"]
+        );
+        // Collapsing hides the folder's requests but keeps its header and count.
+        app.prefs.collapsed.insert("B".into());
+        assert_eq!(
+            shape(&app),
+            ["[B 2 closed]", "[A 1]", "r1", "[Ungrouped 1]", "r3"]
+        );
+        // A search must reach into a closed folder, or its matches would be unreachable.
+        app.search = "r2".into();
+        assert_eq!(shape(&app), ["[B 1]", "r2"]);
+    }
+    #[test]
+    fn reorder_swaps_within_a_folder_only_and_follows_the_selection() {
+        let (_ctx, mut app) = app_with(&["A", "B", "A"]);
+        app.selected = 0;
+        // r0 and r2 share folder A even though r1 sits between them.
+        app.reorder(0, false);
+        assert_eq!(shape(&app), ["[A 2]", "r2", "r0", "[B 1]", "r1"]);
+        assert_eq!(app.selected, 2, "selection follows the moved request");
+        // r1 is alone in B, so it cannot move and nothing changes.
+        let before = shape(&app);
+        app.reorder(1, true);
+        app.reorder(1, false);
+        assert_eq!(shape(&app), before);
     }
     #[test]
     fn page_size_shrinks_only_for_very_long_lines() {
