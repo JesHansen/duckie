@@ -31,7 +31,19 @@ const server = http.createServer(async (req, res) => {
     if (url.searchParams.get('binary') === 'true') for (let i = 0; i < bytes; i += 7) body[i] = 0;
     const gzip = url.searchParams.get('gzip') === 'true';
     res.writeHead(200, { 'content-type': 'text/plain', ...(gzip ? { 'content-encoding': 'gzip' } : {}) });
-    res.end(gzip ? gzipSync(body) : body); return;
+    const payload = gzip ? gzipSync(body) : body;
+    // `chunkMs` trickles the body out in 64 KiB pieces, so a reader can be measured against a
+    // response that arrives over seconds rather than at once.
+    const chunkMs = Number(url.searchParams.get('chunkMs') || 0);
+    if (!chunkMs) { res.end(payload); return; }
+    let at = 0;
+    const timer = setInterval(() => {
+      if (at >= payload.length) { clearInterval(timer); res.end(); return; }
+      res.write(payload.subarray(at, at + 65536));
+      at += 65536;
+    }, chunkMs);
+    res.on('close', () => clearInterval(timer));
+    return;
   }
   const chunks = []; let size = 0;
   for await (const chunk of req) { size += chunk.length; if (size > 20 * 1024 * 1024) { res.writeHead(413); res.end(); return; } chunks.push(chunk); }

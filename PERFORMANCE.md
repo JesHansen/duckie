@@ -33,6 +33,7 @@ cargo test -p duckie-desktop --release -- --ignored --nocapture      # frame con
 | Warm local request dispatch | p95 ≤ 5 ms | p95 **0.62 ms**, including a loopback round trip | pass |
 | Cold test worker overhead, 1 KiB response, trivial test | p95 ≤ 150 ms | p95 **19 ms** (median 15) | pass |
 | 50 MiB response, every shape below | ≤ 32 MiB over settled baseline | **3.8–25.0 MiB** | pass |
+| Cold launch | p95 ≤ 1 s | owner-confirmed acceptable after a reboot; no figure captured | judgement, not a measurement |
 
 Supporting numbers: a whole-body find across 50 MiB completes in 23 ms; GPU texture uploads over 40 frames total 267 KB, which is the font atlas and nothing else.
 
@@ -47,6 +48,7 @@ All against the 32 MiB delta budget, body 50 MiB unless stated.
 | gzip-encoded | 11.7 MiB |
 | Binary, NUL bytes throughout | 4.1 MiB |
 | 60 MiB against a 50 MiB cap, truncated | 3.9 MiB |
+| Trickled in 64 KiB pieces over 12.6 s | 14.4 MiB |
 
 Compressed bodies decode as a bounded stream rather than into memory, and a body that exceeds its cap stops at the limit without a full-body copy. The single-line case is the expensive one, discussed below; it was 213.7 MiB before the preview page was sized to its content.
 
@@ -90,8 +92,8 @@ An earlier glow sample read 146.3 MiB; the current build measures 94.0 MiB on an
 
 Built without the development screenshot and bench features: desktop 13,575,168 bytes, worker 1,401,856 bytes. The packaged ZIP from `scripts/package.ps1`, which also emits `THIRD_PARTY_NOTICES.md`, is 6,525,037 bytes. The desktop binary grew by roughly 460 KB when the icon was added: a 221 KB multi-resolution `.ico` resource plus 64 KB of raw window-icon pixels.
 
-## Still unmeasured
+## Caveats on the numbers above
 
-- **Cold launch**, p95 ≤ 1 s over 20 controlled trials. Defeating the Windows file cache needs either a reboot or standby-list tooling wanting administrator rights, and copying the binary does not help because writing it leaves it cached. A single genuine cold launch after a reboot is the practical substitute and has not been taken.
-- **Slow-streaming peak.** The fixture server's `/slow` endpoint exists and cancellation is covered by the transport tests, but no memory figure has been taken for a response that trickles in.
+- **Cold launch has no figure.** Defeating the Windows file cache needs a reboot or standby-list tooling wanting administrator rights, and copying the binary does not help because writing it leaves it cached. The owner confirmed a post-reboot launch was acceptable, which closes the gate as a judgement; `scripts/benchmark.ps1` with a bench build will produce a number if one is ever wanted.
+- **Frame construction is a lower bound on input-to-paint**, excluding upload, present and the compositor.
 - Figures here cover the GUI process. Test workers are separate processes and are not included in any peak above.
