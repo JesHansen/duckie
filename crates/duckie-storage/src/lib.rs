@@ -61,6 +61,12 @@ fn disk_hash(path: &Path) -> Result<Option<String>> {
     }
 }
 pub fn managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    resolve(&root.canonicalize()?, relative)
+}
+/// `managed_path` for a root already known to be canonical, which `Collection::root` always is.
+/// Canonicalizing the root per file cost 60 ms per thousand on an open that resolves each file
+/// more than once; the escape check below is unaffected and still runs for every path.
+fn resolve(root: &Path, relative: &str) -> Result<PathBuf> {
     let rel = Path::new(relative);
     if rel.as_os_str().is_empty()
         || rel.components().any(|c| !matches!(c, Component::Normal(_)))
@@ -68,24 +74,59 @@ pub fn managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
     {
         bail!("Collection file must be relative and stay inside its folder: {relative}");
     }
-    let root = root.canonicalize()?;
     let path = root.join(rel);
     // Check every existing ancestor, including symlinks/junctions on Windows.
     let mut ancestor = path.as_path();
     while !ancestor.exists() {
         ancestor = ancestor.parent().context("Invalid collection path")?;
     }
-    if !ancestor.canonicalize()?.starts_with(&root) {
+    if !ancestor.canonicalize()?.starts_with(root) {
         bail!("Collection file escapes its folder: {relative}");
     }
     Ok(path)
 }
+/// Resolves and reads many managed files, preserving order.
+///
+/// Opening a collection is syscall-bound rather than CPU-bound: each file costs a path
+/// validation and a read, and on Windows every open also pays antivirus filtering. Spreading
+/// that across threads is what brings a thousand-request restore inside its budget. Each entry
+/// keeps its own error so one bad file reports against its own name.
+fn read_many(root: &Path, names: &[String]) -> Vec<Result<Vec<u8>>> {
+    let read = |name: &String| -> Result<Vec<u8>> {
+        let path = resolve(root, name)?;
+        fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))
+    };
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(8);
+    if names.len() < 64 || threads < 2 {
+        return names.iter().map(read).collect();
+    }
+    let mut out = Vec::with_capacity(names.len());
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = names
+            .chunks(names.len().div_ceil(threads))
+            .map(|chunk| scope.spawn(move || chunk.iter().map(read).collect::<Vec<_>>()))
+            .collect();
+        for handle in handles {
+            // A panic in a reader is a bug, not a recoverable collection error.
+            out.extend(handle.join().expect("collection reader panicked"));
+        }
+    });
+    out
+}
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let bytes = fs::read(path).with_context(|| format!("Cannot read {}", path.display()))?;
+    serde_json::from_value(document(&bytes, path)?)
+        .with_context(|| format!("Unexpected contents in {}", path.display()))
+}
+/// Size and schema-version validation, returning the document so a caller holding the bytes
+/// can convert it without reading the file a second time.
+fn document(bytes: &[u8], path: &Path) -> Result<serde_json::Value> {
     if bytes.len() > 20 * MIB as usize {
         bail!("Collection document exceeds 20 MiB: {}", path.display());
     }
-    let v: serde_json::Value = serde_json::from_slice(&bytes)
+    let v: serde_json::Value = serde_json::from_slice(bytes)
         .with_context(|| format!("Invalid JSON in {}", path.display()))?;
     if let Some(version) = v["schemaVersion"]
         .as_u64()
@@ -96,7 +137,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
             path.display()
         );
     }
-    serde_json::from_value(v).with_context(|| format!("Unexpected contents in {}", path.display()))
+    Ok(v)
 }
 fn json(value: &impl Serialize) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
@@ -183,54 +224,82 @@ impl Collection {
             hashes: BTreeMap::new(),
         };
         result.track("duckie.json")?;
-        let mut ids = std::collections::HashSet::new();
-        for relative in result.manifest.requests.clone() {
-            let path = managed_path(&result.root, &relative)?;
-            let mut v: serde_json::Value = read_json(&path)?;
-            result.track(&relative)?;
-            if let Some(file) = v["body"]["file"].as_str().map(str::to_owned) {
-                let body_path = managed_path(&result.root, &file)?;
-                if fs::metadata(&body_path)?.len() > 20 * MIB {
-                    bail!("Editable body exceeds 20 MiB; use File body mode");
-                }
-                v["body"]["text"] = fs::read_to_string(body_path)?.into();
-                v["body"].as_object_mut().unwrap().remove("file");
-                result.track(&file)?;
+        // Two passes: request files can be read at once, but the body and test files they
+        // reference are only known after parsing, so they form a second batch.
+        let names = result.manifest.requests.clone();
+        let mut documents = Vec::with_capacity(names.len());
+        let mut attachments = vec![];
+        for (relative, bytes) in names.iter().zip(read_many(&result.root, &names)) {
+            let bytes = bytes?;
+            let value = document(&bytes, &result.path(relative)?)?;
+            result.track_bytes(relative, &bytes);
+            if let Some(file) = value["body"]["file"].as_str() {
+                attachments.push(file.to_owned());
             }
-            let definition: RequestDefinition = serde_json::from_value(v)?;
+            let tests = value["tests"]["file"].as_str().unwrap_or_default();
+            if !tests.is_empty() {
+                attachments.push(tests.to_owned());
+            }
+            documents.push(value);
+        }
+        let mut loaded = BTreeMap::new();
+        for (relative, bytes) in attachments
+            .iter()
+            .zip(read_many(&result.root, &attachments))
+        {
+            let bytes = bytes?;
+            let limit = if relative.starts_with("bodies/") {
+                20 * MIB
+            } else {
+                MIB
+            };
+            if bytes.len() as u64 > limit {
+                bail!(
+                    "{relative} exceeds {} MiB; use File body mode or shorten the test",
+                    limit / MIB
+                );
+            }
+            result.track_bytes(relative, &bytes);
+            loaded.insert(
+                relative.clone(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            );
+        }
+        let mut ids = std::collections::HashSet::new();
+        for mut value in documents {
+            if let Some(file) = value["body"]["file"].as_str().map(str::to_owned) {
+                let text = loaded.get(&file).cloned().unwrap_or_default();
+                value["body"]["text"] = text.into();
+                value["body"].as_object_mut().unwrap().remove("file");
+            }
+            let definition: RequestDefinition = serde_json::from_value(value)?;
             if !ids.insert(definition.id.clone()) {
                 bail!("Duplicate request ID {}", definition.id);
             }
-            let source = if definition.tests.file.is_empty() {
-                String::new()
-            } else {
-                let path = managed_path(&result.root, &definition.tests.file)?;
-                if fs::metadata(&path)?.len() > MIB {
-                    bail!("Test source exceeds 1 MiB");
-                }
-                let text = fs::read_to_string(path)?;
-                result.track(&definition.tests.file)?;
-                text
-            };
+            let source = loaded
+                .get(&definition.tests.file)
+                .cloned()
+                .unwrap_or_default();
             result.requests.push(StoredRequest { definition, source });
         }
-        let env_dir = managed_path(&result.root, "environments")?;
+        let env_dir = result.path("environments")?;
         if env_dir.exists() {
             for entry in fs::read_dir(env_dir)? {
                 let entry = entry?;
                 if entry.path().extension().is_some_and(|x| x == "json") {
                     let relative = format!("environments/{}", entry.file_name().to_string_lossy());
+                    let bytes = result.read_tracked(&relative)?;
+                    let path = result.path(&relative)?;
                     result
                         .environments
-                        .push(read_json(&managed_path(&result.root, &relative)?)?);
-                    result.track(&relative)?;
+                        .push(serde_json::from_value(document(&bytes, &path)?)?);
                 }
             }
         }
         if result.environments.is_empty() {
             result.environments.push(Environment::default());
         }
-        let secret_path = managed_path(&result.root, ".duckie/secrets.json")?;
+        let secret_path = result.path(".duckie/secrets.json")?;
         if secret_path.exists() {
             result.secrets = read_json(&secret_path)?;
         }
@@ -239,17 +308,30 @@ impl Collection {
         result.track(".gitignore")?;
         Ok(result)
     }
+    fn path(&self, relative: &str) -> Result<PathBuf> {
+        resolve(&self.root, relative)
+    }
     fn track(&mut self, relative: &str) -> Result<()> {
-        self.hashes.insert(
-            relative.into(),
-            disk_hash(&managed_path(&self.root, relative)?)?,
-        );
+        self.hashes
+            .insert(relative.into(), disk_hash(&self.path(relative)?)?);
         Ok(())
+    }
+    /// Records the hash of content already read. Re-reading a file purely to hash it doubled
+    /// both the I/O and the path validation performed by every open.
+    fn track_bytes(&mut self, relative: &str, bytes: &[u8]) {
+        self.hashes.insert(relative.into(), Some(hash(bytes)));
+    }
+    /// Reads a managed file once and records its hash from the same bytes.
+    fn read_tracked(&mut self, relative: &str) -> Result<Vec<u8>> {
+        let path = self.path(relative)?;
+        let bytes = fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))?;
+        self.track_bytes(relative, &bytes);
+        Ok(bytes)
     }
     pub fn changed_on_disk(&self) -> Result<Vec<String>> {
         let mut changed = vec![];
         for (name, saved) in &self.hashes {
-            if &disk_hash(&managed_path(&self.root, name)?)? != saved {
+            if &disk_hash(&self.path(name)?)? != saved {
                 changed.push(name.clone());
             }
         }
@@ -263,7 +345,7 @@ impl Collection {
                 changed.join(", ")
             );
         }
-        if managed_path(&self.root, ".duckie/pending-save.json")?.exists() {
+        if self.path(".duckie/pending-save.json")?.exists() {
             bail!(
                 "An interrupted save is pending. Reopen the collection to recover it before saving again."
             );
@@ -274,7 +356,7 @@ impl Collection {
         for req in &mut self.requests {
             // Stable, filesystem-safe IDs determine file names; imported/user IDs are validated as paths.
             let relative = format!("requests/{}.request.json", req.definition.id);
-            managed_path(&self.root, &relative)?;
+            resolve(&self.root, &relative)?;
             if req.definition.tests.file.is_empty() {
                 req.definition.tests.file = format!("tests/{}.test.js", req.definition.id);
             }
@@ -326,7 +408,7 @@ impl Collection {
         if !self.secrets.environments.is_empty() {
             writes.push((".duckie/secrets.json".into(), json(&self.secrets)?));
         }
-        let ignore_path = managed_path(&self.root, ".gitignore")?;
+        let ignore_path = self.path(".gitignore")?;
         let mut ignore = fs::read_to_string(&ignore_path).unwrap_or_default();
         if !ignore.lines().any(|s| s == "/.duckie/") {
             if !ignore.is_empty() && !ignore.ends_with('\n') {
@@ -344,7 +426,7 @@ impl Collection {
             if !seen.insert(relative.clone()) {
                 bail!("Two managed resources use {relative}");
             }
-            let path = managed_path(&self.root, &relative)?;
+            let path = self.path(&relative)?;
             let before = disk_hash(&path)?;
             if !self.hashes.contains_key(&relative) && before.is_some() {
                 bail!("Refusing to overwrite an existing untracked file: {relative}");
@@ -356,7 +438,7 @@ impl Collection {
             });
         }
         let journal = Journal { entries };
-        let journal_path = managed_path(&self.root, ".duckie/pending-save.json")?;
+        let journal_path = self.path(".duckie/pending-save.json")?;
         atomic_write(&journal_path, &json(&journal)?)?;
         recover(&self.root)?;
         self.manifest = manifest;
