@@ -69,6 +69,47 @@ fn decode_preview(
     )
 }
 pub const EXAMPLE: &str = "test(\"returns a successful JSON response\", () => {\n  expect(response.status).toBe(200);\n  expect(response.header(\"content-type\")).toContain(\"application/json\");\n  expect(response.json()).toBeType(\"object\");\n});\n";
+/// Plain text on the system clipboard, if any. Windows-only, like the rest of this desktop
+/// shell: reading `CF_UNICODETEXT` through `OpenClipboard`/`GetClipboardData` is the ordinary
+/// Win32 way to do this and needs no clipboard crate this app has no other use for. `None` for
+/// an empty or non-text clipboard, or if it could not be opened (another application can hold it
+/// briefly), never a panic.
+#[cfg(windows)]
+pub fn clipboard_text() -> Option<String> {
+    use windows_sys::Win32::System::{
+        DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+        Memory::{GlobalLock, GlobalUnlock},
+    };
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let handle = GetClipboardData(CF_UNICODETEXT);
+        let text = if handle.is_null() {
+            None
+        } else {
+            let ptr = GlobalLock(handle) as *const u16;
+            if ptr.is_null() {
+                None
+            } else {
+                let mut len = 0usize;
+                while *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+                GlobalUnlock(handle);
+                Some(text)
+            }
+        };
+        CloseClipboard();
+        text
+    }
+}
+#[cfg(not(windows))]
+pub fn clipboard_text() -> Option<String> {
+    None
+}
 #[derive(PartialEq, Clone, Copy)]
 pub enum RequestTab {
     Params,
@@ -252,9 +293,14 @@ pub struct Duckie {
     pub delete: Option<usize>,
     pub about: bool,
     pub focus_url: bool,
-    /// Set by Ctrl+T alongside switching to the Auth tab; the Auth tab's bearer token field
-    /// claims focus on the frame it sees this set, then clears it, mirroring `focus_url`.
+    /// Set by Ctrl+T when the clipboard held no usable text, alongside switching to the Auth
+    /// tab; the Auth tab's bearer token field claims focus on the frame it sees this set, then
+    /// clears it, mirroring `focus_url`.
     pub focus_token: bool,
+    /// How Ctrl+T reads the clipboard. A function pointer rather than calling `clipboard_text`
+    /// directly so a test can swap in a deterministic stub instead of depending on — and
+    /// mutating — whatever is actually on the real system clipboard.
+    pub clipboard_read: fn() -> Option<String>,
     /// Bumped for every new scan; a worker whose generation no longer matches stops early.
     pub search_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Files found changed on disk, and the set already shown, so the same change is reported
@@ -321,6 +367,7 @@ impl Duckie {
             about: false,
             focus_url: true,
             focus_token: false,
+            clipboard_read: clipboard_text,
             search_generation: Default::default(),
             disk_changes: vec![],
             disk_dismissed: vec![],

@@ -256,8 +256,8 @@ impl Duckie {
         if pressed(Modifiers::CTRL, Key::L) {
             self.focus_url = true;
         }
-        // Grab a token, hit Ctrl+T, paste — the common case of getting a fresh bearer token
-        // into the active request without hunting for the Auth tab first.
+        // Grab a token, hit Ctrl+T — the common case of getting a fresh bearer token into the
+        // active request without switching to the Auth tab and pasting by hand.
         if pressed(Modifiers::CTRL, Key::T) {
             self.request_tab = RequestTab::Auth;
             if self.drafts[self.selected].request.auth.bearer.is_none() {
@@ -266,7 +266,34 @@ impl Duckie {
                 });
                 self.touch();
             }
-            self.focus_token = true;
+            let secret_key = self.drafts[self.selected]
+                .request
+                .auth
+                .bearer
+                .as_ref()
+                .unwrap()
+                .secret
+                .clone();
+            match (self.clipboard_read)()
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty())
+            {
+                Some(token) => {
+                    let env = self.envs[self.env_index].name.clone();
+                    self.secrets
+                        .entry(env.clone())
+                        .or_default()
+                        .insert(secret_key.clone(), token);
+                    self.status = format!("Pasted the clipboard into \"{secret_key}\" ({env}).");
+                    self.touch();
+                }
+                // No usable text on the clipboard: fall back to focusing the field for a manual
+                // paste instead of silently doing nothing.
+                None => {
+                    self.focus_token = true;
+                    self.status = "Clipboard has no text to use as a bearer token.".into();
+                }
+            }
         }
         if pressed(Modifiers::CTRL, Key::B) {
             self.prefs.sidebar = !self.prefs.sidebar;
@@ -1785,14 +1812,8 @@ mod tests {
         assert!(app.responses.is_empty());
         assert!(!app.service.busy());
     }
-    #[test]
-    fn ctrl_t_switches_to_auth_and_focuses_the_bearer_token_field() {
-        let ctx = egui::Context::default();
-        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-        let mut app = Duckie::new(&cc);
-        let mut frame = eframe::Frame::_new_kittest();
-        app.request_tab = RequestTab::Params;
-        assert!(app.drafts[0].request.auth.bearer.is_none());
+    /// Sends the Ctrl+T shortcut for one frame and drains the resulting texture delta.
+    fn press_ctrl_t(ctx: &egui::Context, app: &mut Duckie, frame: &mut eframe::Frame) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1807,41 +1828,74 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        let mut output = ctx.run_ui(input, |ui| app.ui(ui, frame));
         output.textures_delta.clear();
-        assert!(app.request_tab == RequestTab::Auth);
-        // A bearer binding is created so there is a field to land in, and that is a real edit.
-        assert!(app.drafts[0].request.auth.bearer.is_some());
-        assert!(app.drafts[0].dirty);
-        // The flag is consumed the same frame the Auth tab renders, not left pending.
-        assert!(!app.focus_token);
+    }
+    #[test]
+    fn ctrl_t_pastes_clipboard_text_into_the_bearer_secret() {
+        let ctx = egui::Context::default();
+        let mut app = Duckie::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        let mut frame = eframe::Frame::_new_kittest();
+        app.request_tab = RequestTab::Params;
+        app.clipboard_read = || Some("  eyJhbGciOi...\n".into());
+        assert!(app.drafts[0].request.auth.bearer.is_none());
 
-        // Pressing it again with a bearer already set must not disturb the existing binding.
+        press_ctrl_t(&ctx, &mut app, &mut frame);
+        assert!(app.request_tab == RequestTab::Auth);
+        // A bearer binding is created so there is a secret for the clipboard text to land in.
+        let secret = app.drafts[0]
+            .request
+            .auth
+            .bearer
+            .as_ref()
+            .unwrap()
+            .secret
+            .clone();
+        assert!(app.drafts[0].dirty);
+        assert!(!app.focus_token, "the clipboard already supplied the value");
+        let env = app.envs[app.env_index].name.clone();
+        assert_eq!(
+            app.secrets
+                .get(&env)
+                .and_then(|v| v.get(&secret))
+                .map(String::as_str),
+            Some("eyJhbGciOi..."),
+            "surrounding whitespace is trimmed"
+        );
+
+        // Pressing it again with a bearer already set must not disturb the existing binding,
+        // only the secret's value.
         app.drafts[0].request.auth.bearer = Some(SecretBinding {
             secret: "existing".into(),
         });
         app.drafts[0].dirty = false;
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1200.0, 820.0),
-            )),
-            events: vec![egui::Event::Key {
-                key: egui::Key::T,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            }],
-            ..Default::default()
-        };
-        let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
-        output.textures_delta.clear();
+        app.clipboard_read = || Some("fresh-token".into());
+        press_ctrl_t(&ctx, &mut app, &mut frame);
         assert_eq!(
             app.drafts[0].request.auth.bearer.as_ref().unwrap().secret,
             "existing"
         );
-        assert!(!app.drafts[0].dirty, "no content changed, so no new edit");
+        assert_eq!(
+            app.secrets
+                .get(&env)
+                .and_then(|v| v.get("existing"))
+                .map(String::as_str),
+            Some("fresh-token")
+        );
+        assert!(app.drafts[0].dirty, "the secret's value did change");
+    }
+    #[test]
+    fn ctrl_t_falls_back_to_focusing_the_field_when_the_clipboard_has_no_text() {
+        let ctx = egui::Context::default();
+        let mut app = Duckie::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        let mut frame = eframe::Frame::_new_kittest();
+        app.clipboard_read = || None;
+
+        press_ctrl_t(&ctx, &mut app, &mut frame);
+        assert!(app.request_tab == RequestTab::Auth);
+        assert!(app.drafts[0].request.auth.bearer.is_some());
+        // The flag is consumed the same frame the Auth tab renders, not left pending.
+        assert!(!app.focus_token);
     }
     #[test]
     fn lazy_loaded_requests_hydrate_on_selection_and_before_save() {

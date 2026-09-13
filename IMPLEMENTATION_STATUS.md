@@ -50,7 +50,7 @@ Version bump to 1.0.0 validated on 13 September 2026 in the working tree: format
 - OpenAPI 3.0/3.1/3.2 JSON imports from local files or protected URLs into a review draft. Internal, relative local and same-origin remote references resolve transitively with rebasing, bounded at 50 documents and 20 MiB. Import handles examples, read-only omission, server precedence, security alternatives/combined requirements, `allOf` merges, and selectable `oneOf`/`anyOf` bodies.
 - Parameter serialization covers query `form`/`deepObject` objects and arrays, `spaceDelimited`/`pipeDelimited` arrays, and path `simple`/`label`/`matrix`, honoring supported `explode` combinations. Undefined forms such as arrays of objects remain blocked. URL path substitutions encode structural characters while preserving existing percent escapes and style punctuation; dot traversal segments are rejected before parsing.
 - The native UI includes dark/light/system themes, file dialogs, retained dirty drafts, grouped/collapsible folders and ordering, line-numbered editors, bounded syntax colouring, bracket matching, focused-editor find, and response snapshot labels. Editor undo buffers are not persisted.
-- **Ctrl+T** switches to the Auth tab and focuses the bearer token value field, enabling bearer auth first if the request has none, so pasting a freshly copied token is Ctrl+T, Ctrl+V.
+- **Ctrl+T** reads the clipboard directly (Win32 `OpenClipboard`/`GetClipboardData`, no clipboard crate) and pastes it into the request's bearer token secret, enabling bearer auth first if it has none — copy a token, press Ctrl+T, done. An empty or non-text clipboard falls back to switching to the Auth tab and focusing the token field for a manual paste.
 
 ## Remaining work, in priority order
 
