@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, File},
     io::Write,
     path::{Component, Path, PathBuf},
 };
@@ -203,6 +203,25 @@ struct WriteEntry {
 struct Journal {
     entries: Vec<WriteEntry>,
 }
+/// Serializes a save transaction (disk-change check, journal write, journal recovery) across
+/// processes and instances sharing this collection. An OS-level lock is used rather than a
+/// plain marker file so a crashed holder cannot wedge every other instance: Windows and the
+/// kernel release the lock the moment the holding process exits, the same guarantee the 24-hour
+/// spool sweep already relies on. Blocks until acquired; a save transaction is brief, so the
+/// wait is bounded by however long the other instance takes to finish its own save.
+fn lock_transaction(root: &Path) -> Result<File> {
+    let path = resolve(root, ".duckie/lock")?;
+    fs::create_dir_all(path.parent().context("Missing parent directory")?)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("Cannot open {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("Cannot lock {}", path.display()))?;
+    Ok(file)
+}
 fn recover(root: &Path) -> Result<()> {
     let journal_path = managed_path(root, ".duckie/pending-save.json")?;
     if !journal_path.exists() {
@@ -251,7 +270,10 @@ impl Collection {
     }
     pub fn open(root: &Path) -> Result<Self> {
         let root = root.canonicalize()?;
-        recover(&root)?;
+        {
+            let _lock = lock_transaction(&root)?;
+            recover(&root)?;
+        }
         let manifest: Manifest = read_json(&managed_path(&root, "duckie.json")?)?;
         let mut result = Self {
             root,
@@ -378,6 +400,7 @@ impl Collection {
         }
     }
     pub fn save(&mut self) -> Result<()> {
+        let _lock = lock_transaction(&self.root)?;
         let changed = self.changed_on_disk()?;
         if !changed.is_empty() {
             bail!(
@@ -656,5 +679,38 @@ mod tests {
             Ok(_) => panic!("a newer schema version must not open"),
             Err(e) => assert!(e.to_string().contains("duckie.json"), "{e}"),
         }
+    }
+    #[test]
+    fn save_transactions_are_serialized_across_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        Collection::new(dir.path().into(), "Example".into())
+            .unwrap()
+            .save()
+            .unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        // Stands in for another instance mid-transaction: `Collection::save` and the
+        // recovery step in `Collection::open` both take this same lock.
+        let held = lock_transaction(&root).unwrap();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (unblocked_tx, unblocked_rx) = std::sync::mpsc::channel::<()>();
+        let other_root = root.clone();
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _second = lock_transaction(&other_root).unwrap();
+            unblocked_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            unblocked_rx.try_recv().is_err(),
+            "a second transaction acquired the lock while the first still held it"
+        );
+        drop(held);
+        unblocked_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the second transaction should acquire the lock once released");
+        handle.join().unwrap();
     }
 }

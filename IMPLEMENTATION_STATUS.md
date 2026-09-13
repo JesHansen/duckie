@@ -20,13 +20,15 @@ Path-value fix validated on 13 September 2026 in the working tree: `cargo fmt --
 
 Charset/binary preview and content-encoding diagnostics validated on 13 September 2026: formatting, strict workspace Clippy, and all 78 non-measurement workspace tests passed; four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. Release binaries were rebuilt without development features, the 262 third-party dependency license expressions were reviewed as permissive, and `scripts/package.ps1` produced a refreshed portable ZIP. Performance measurements were not rerun because this chunk does not change the established release gates.
 
+Multi-process transaction locking validated on 13 September 2026 in the working tree: formatting, strict workspace Clippy, and all 79 non-measurement workspace tests passed (one new test added); four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. Release binaries and the portable ZIP were not rebuilt or revalidated for this change.
+
 | Area | Recorded status | Remaining scope or qualification |
 | --- | --- | --- |
 | 1. Performance | Accepted for the agreed v1 scope | See PERFORMANCE.md. Cold launch has owner acceptance without a measured p95; CPU frame construction is only a lower bound on input-to-paint; reported GUI memory peaks exclude workers. |
 | 2. Windows validation | Accepted for the agreed v1 scope | Horizon and display-scale walkthroughs accepted; excluded enterprise/accessibility cases remain uncertified. |
 | 3. OpenAPI completeness | Open | Media handling, relative servers, source provenance, and reviewed reimport. |
 | 4. Editor polish | Accepted for the agreed v1 scope | Line numbers, syntax colours, bracket matching, grouped ordering, find navigation, and assertion-line navigation implemented. F6 traversal was dropped with accessibility. |
-| 5. Storage hardening | Open | Multi-process transaction locking and lazy body/test loading. |
+| 5. Storage hardening | Open | Multi-process transaction locking implemented; see below. Lazy body/test loading remains open (Tier D). |
 | 6. Transport polish | Accepted for the agreed v1 scope | Path-value encoding, charset-aware/binary preview choices, and safe content-encoding diagnostics implemented. |
 | 7. Packaging | Accepted for the agreed v1 scope | MIT license and dependency review recorded; portable package accepted on a clean machine. Keep development features out of later packages. |
 
@@ -48,7 +50,7 @@ Charset/binary preview and content-encoding diagnostics validated on 13 Septembe
 
 1. **Exact path-value encoding (area 6): completed 13 September 2026.** See the resolution and regression coverage below.
 2. **Charset and binary preview options (area 6): completed 13 September 2026.** See the resolution below.
-3. **Multi-process transaction locking (area 5).** Save-time content-hash checks already catch external changes; locking should coordinate the transaction itself across instances.
+3. **Multi-process transaction locking (area 5): completed 13 September 2026.** See the resolution below. Tier B is now closed; lazy body/test loading remains open as Tier D item 8.
 
 ### Tier C — import completeness (area 3)
 
@@ -93,6 +95,14 @@ URLs must start with `http://` or `https://` (case-insensitive). Parser shorthan
 Response previews now honor supported `charset` labels in `Content-Type`; the retained body stays byte-for-byte unchanged. Undeclared invalid UTF-8, NUL-bearing content, and unknown declared charsets remain classified as binary. The body view offers explicit UTF-8 and Windows-1252 overrides, clearly labels an override, and can return to automatic detection. Whole-body find encodes its query with the displayed charset so match offsets still refer to the retained bytes.
 
 `Content-Encoding` is parsed across repeated fields and comma-separated values. Duckie accepts identity or one supported gzip, deflate, Brotli, or Zstandard coding. Unknown and stacked codings stop body processing with actionable detail; malformed, non-ASCII, empty, or oversized values receive a fixed diagnostic. Only short validated HTTP token characters are ever echoed, so arbitrary header data, response bytes, URLs, and credentials cannot enter the diagnostic.
+
+## Resolved: multi-process transaction locking
+
+Save-time content-hash checks already caught changes made by another instance *before* a save began, but the save transaction itself — the disk-change check, writing `.duckie/pending-save.json`, and applying it — was not coordinated across processes. Two instances saving the same collection at once could interleave those steps: one instance's atomic journal write could be overwritten by the other's before either applied it, so `recover` could apply the wrong entries.
+
+`Collection::save` and the recovery step in `Collection::open` now hold an OS-level exclusive lock on `.duckie/lock` for the duration of that transaction. The lock is per-open-handle (`std::fs::File::lock`, stable since Rust 1.89), not a marker file the code has to clean up itself: Windows and the kernel release it the instant the holding process exits or crashes, the same guarantee the 24-hour spool sweep already relies on for `FILE_SHARE_DELETE`. A second instance's save blocks until the first finishes, then proceeds through its own content-hash check as before, so a genuine conflict (both instances editing the same collection) still surfaces as the existing "Changed on disk" error rather than silent corruption.
+
+Regression coverage takes the lock directly from two threads to verify the second blocks until the first releases it, standing in for two instances racing to save.
 
 ## Implementation cautions
 
