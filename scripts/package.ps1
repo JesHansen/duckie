@@ -16,7 +16,13 @@ try {
             throw "$desktop contains $marker, so it was built with a development feature. Rebuild without it before packaging."
         }
     }
-    $destination = Join-Path $root 'dist/Duckie-0.1.0-windows-x64'
+    $metadataText = cargo metadata --format-version 1 --locked --filter-platform x86_64-pc-windows-msvc
+    if ($LASTEXITCODE -ne 0) { throw 'Dependency metadata failed' }
+    $metadata = $metadataText | ConvertFrom-Json
+    # Read the version from Cargo.toml via cargo metadata rather than hardcoding it here, so the
+    # package name cannot silently drift from the workspace version after a bump.
+    $version = ($metadata.packages | Where-Object { $_.name -eq 'duckie-desktop' }).version
+    $destination = Join-Path $root "dist/Duckie-$version-windows-x64"
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
     foreach ($file in @('duckie.exe', 'duckie-test-worker.exe')) {
         Copy-Item -LiteralPath (Join-Path $root "target/release/$file") -Destination $destination -Force
@@ -24,9 +30,6 @@ try {
     foreach ($file in @('LICENSE', 'README.md', 'IMPLEMENTATION_STATUS.md', 'PERFORMANCE.md')) {
         Copy-Item -LiteralPath (Join-Path $root $file) -Destination $destination -Force
     }
-    $metadataText = cargo metadata --format-version 1 --locked --filter-platform x86_64-pc-windows-msvc
-    if ($LASTEXITCODE -ne 0) { throw 'Dependency metadata failed' }
-    $metadata = $metadataText | ConvertFrom-Json
     $notices = [System.Text.StringBuilder]::new()
     [void]$notices.AppendLine('# Third-party dependencies')
     [void]$notices.AppendLine('Duckie itself is MIT licensed; see LICENSE. Below is the metadata and available license/notice files for every crate linked into these binaries.')
@@ -43,7 +46,7 @@ try {
         }
     }
     [System.IO.File]::WriteAllText((Join-Path $destination 'THIRD_PARTY_NOTICES.md'), $notices.ToString(), [System.Text.UTF8Encoding]::new($false))
-    $zip = Join-Path $root 'dist/Duckie-0.1.0-windows-x64.zip'
+    $zip = Join-Path $root "dist/Duckie-$version-windows-x64.zip"
     Compress-Archive -Path $destination -DestinationPath $zip -Force
     Get-Item -LiteralPath $zip | Select-Object FullName, Length
 } finally { Pop-Location }

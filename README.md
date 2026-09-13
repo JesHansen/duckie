@@ -1,6 +1,6 @@
 # Duckie
 
-A small, local HTTP workbench for Windows. **0.1.0 is the first development preview of v1**, based on [ARCHITECTURE.md](ARCHITECTURE.md) and [UI_DESIGN.md](UI_DESIGN.md).
+A small, local HTTP workbench for Windows. **1.0.0 is the v1 release**, based on [ARCHITECTURE.md](ARCHITECTURE.md) and [UI_DESIGN.md](UI_DESIGN.md), with the owner decisions and delivery status in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) taking precedence.
 
 Compose a request, paste credentials, send once, inspect the response, and run JavaScript assertions. No Duckie account, telemetry, update checks, cloud service, or background API traffic. Collection files stay on your disk.
 

@@ -221,9 +221,9 @@ impl Duckie {
         }
         if self.about {
             egui::Window::new("About Duckie").open(&mut self.about).resizable(false).show(ctx,|ui|{
-            ui.heading("Duckie 0.1.0");ui.label("A small, local HTTP workbench for Windows.");ui.separator();
+            ui.heading("Duckie 1.0.0");ui.label("A small, local HTTP workbench for Windows.");ui.separator();
             ui.label("Ctrl+N   New request\nCtrl+O   Open collection\nCtrl+S   Save collection\nCtrl+Enter   Send request\nCtrl+Shift+Enter   Rerun tests without HTTP\nCtrl+L   Focus URL\nCtrl+T   Focus bearer token\nCtrl+K   Find requests\nCtrl+B   Toggle sidebar\nEscape   Close dialog or stop work");
-            ui.separator();ui.label("First development preview. See README.md and IMPLEMENTATION_STATUS.md for coverage and release gates.");
+            ui.separator();ui.label("See README.md and IMPLEMENTATION_STATUS.md for coverage and release gates.");
         });
         }
     }
