@@ -13,7 +13,7 @@ cargo build --workspace --release
 .\target\release\duckie.exe
 ```
 
-Keep `duckie-test-worker.exe` beside `duckie.exe`. Building only the desktop crate does not build the test worker. A portable ZIP can be produced with `./scripts/package.ps1`.
+Duckie draws with OpenGL 3 or newer. If the graphics driver cannot provide that — which can happen in a virtual desktop session without acceleration — it reports the failure in a dialog and exits rather than starting invisibly. Keep `duckie-test-worker.exe` beside `duckie.exe`. Building only the desktop crate does not build the test worker. A portable ZIP can be produced with `./scripts/package.ps1`.
 
 On first launch, paste an HTTP(S) URL and press **Ctrl+Enter**. Auth supports a bearer token, a header API key, or both. Change request tabs to edit parameters, headers, body, tests, and transport settings. **Ctrl+S saves the whole collection**, including its dirty drafts and local environment changes. Sending never saves automatically.
 
