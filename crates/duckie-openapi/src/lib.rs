@@ -60,11 +60,27 @@ fn sample(root: &Value, schema: &Value, depth: usize) -> Result<Value> {
             return Ok(v.clone());
         }
     }
-    if schema.get("oneOf").is_some()
-        || schema.get("anyOf").is_some()
-        || schema.get("allOf").is_some()
-    {
-        bail!("Composed schema needs an explicit body example");
+    // `allOf` is a conjunction, so every branch contributes its properties to one object.
+    if let Some(branches) = schema["allOf"].as_array() {
+        let mut merged = serde_json::Map::new();
+        for branch in branches {
+            match sample(root, branch, depth + 1)? {
+                Value::Object(map) => merged.extend(map),
+                _ => {
+                    bail!("allOf combines schemas that are not objects; supply body data manually")
+                }
+            }
+        }
+        // Properties declared beside the allOf apply as well.
+        merged.extend(object_properties(root, schema, depth)?);
+        return Ok(Value::Object(merged));
+    }
+    // `oneOf`/`anyOf` are choices. Nested ones collapse to the first branch; a choice at the top
+    // of a request body is offered to the user instead, in `variants`.
+    for key in ["oneOf", "anyOf"] {
+        if let Some(first) = schema[key].as_array().and_then(|list| list.first()) {
+            return sample(root, first, depth + 1);
+        }
     }
     let typ = schema["type"]
         .as_str()
@@ -79,18 +95,7 @@ fn sample(root: &Value, schema: &Value, depth: usize) -> Result<Value> {
             "string"
         });
     Ok(match typ {
-        "object" => {
-            let mut object = serde_json::Map::new();
-            if let Some(properties) = schema["properties"].as_object() {
-                for (name, property) in properties {
-                    let p = deref(root, property)?;
-                    if p["readOnly"] != true {
-                        object.insert(name.clone(), sample(root, p, depth + 1)?);
-                    }
-                }
-            }
-            Value::Object(object)
-        }
+        "object" => Value::Object(object_properties(root, schema, depth)?),
         "array" => json!([sample(root, &schema["items"], depth + 1)?]),
         "integer" | "number" => json!(0),
         "boolean" => json!(false),
@@ -102,6 +107,45 @@ fn sample(root: &Value, schema: &Value, depth: usize) -> Result<Value> {
             _ => "example",
         }),
     })
+}
+/// Sample values for a schema's own `properties`, omitting read-only ones, which a request body
+/// must not carry.
+fn object_properties(
+    root: &Value,
+    schema: &Value,
+    depth: usize,
+) -> Result<serde_json::Map<String, Value>> {
+    let mut object = serde_json::Map::new();
+    if let Some(properties) = schema["properties"].as_object() {
+        for (name, property) in properties {
+            let property = deref(root, property)?;
+            if property["readOnly"] != true {
+                object.insert(name.clone(), sample(root, property, depth + 1)?);
+            }
+        }
+    }
+    Ok(object)
+}
+/// The alternatives a request-body schema offers. A `oneOf`/`anyOf` at the top level becomes one
+/// labelled candidate per branch, so the import review can pick rather than block.
+fn variants(root: &Value, schema: &Value) -> Result<Vec<(String, Value)>> {
+    let resolved = deref(root, schema)?;
+    for key in ["oneOf", "anyOf"] {
+        if let Some(branches) = resolved[key].as_array().filter(|list| !list.is_empty()) {
+            return branches
+                .iter()
+                .enumerate()
+                .map(|(i, branch)| {
+                    let label = deref(root, branch)
+                        .ok()
+                        .and_then(|b| b["title"].as_str().map(str::to_owned))
+                        .unwrap_or_else(|| format!("{key} option {}", i + 1));
+                    Ok((label, sample(root, branch, 1)?))
+                })
+                .collect();
+        }
+    }
+    Ok(vec![(String::new(), sample(root, schema, 0)?)])
 }
 fn scalar(value: &Value) -> Option<String> {
     match value {
@@ -427,9 +471,17 @@ pub fn import_json(bytes: &[u8]) -> Result<ImportDraft> {
                                         .push((format!("{media} · From example"), example.clone()));
                                 }
                                 if examples.is_empty() {
-                                    match sample(&root, &definition["schema"], 0) {
-                                        Ok(v) => examples
-                                            .push((format!("{media} · Generated placeholder"), v)),
+                                    match variants(&root, &definition["schema"]) {
+                                        Ok(list) => {
+                                            examples.extend(list.into_iter().map(|(label, v)| {
+                                                let label = if label.is_empty() {
+                                                    "Generated placeholder".to_string()
+                                                } else {
+                                                    format!("Generated from {label}")
+                                                };
+                                                (format!("{media} · {label}"), v)
+                                            }))
+                                        }
                                         Err(e) => {
                                             diagnostics.push(e.to_string());
                                             examples.push((
@@ -638,6 +690,74 @@ mod tests {
             request.variables.get("tags").map(String::as_str),
             Some("a,b")
         );
+    }
+    fn body_of(schema: Value) -> (Vec<String>, Vec<String>) {
+        body_of_with(
+            schema,
+            json!({"schemas":{"Named":{"type":"object","properties":{"extra":{"type":"string"}}}}}),
+        )
+    }
+    fn body_of_with(schema: Value, components: Value) -> (Vec<String>, Vec<String>) {
+        let root = json!({"openapi":"3.1.0","components":components,"paths":{"/":{"post":{"requestBody":{"content":{"application/json":{"schema":schema}}}}}}});
+        let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
+        let op = &draft.operations[0];
+        let texts = op
+            .bodies
+            .iter()
+            .map(|(_, body)| match body {
+                Body::Json { text } => text.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        (
+            op.bodies.iter().map(|(label, _)| label.clone()).collect(),
+            texts,
+        )
+    }
+    #[test]
+    fn all_of_merges_every_branch_and_the_schema_s_own_properties() {
+        let (_, bodies) = body_of(json!({
+            "allOf": [
+                {"type":"object","properties":{"id":{"type":"integer"},"secret":{"type":"string","readOnly":true}}},
+                {"$ref":"#/components/schemas/Named"}
+            ],
+            "properties": {"own": {"type":"string","default":"mine"}}
+        }));
+        assert_eq!(bodies.len(), 1);
+        let text = &bodies[0];
+        for expected in ["\"id\"", "extra", "mine"] {
+            assert!(text.contains(expected), "{expected} missing from {text}");
+        }
+        // readOnly properties must never reach a request body, composed or not.
+        assert!(!text.contains("secret"), "{text}");
+    }
+    #[test]
+    fn a_branch_that_cannot_be_resolved_blocks_rather_than_merging_what_is_left() {
+        let root = json!({"openapi":"3.1.0","paths":{"/":{"post":{"requestBody":{"content":{"application/json":{"schema":{"allOf":[{"type":"object","properties":{"id":{"type":"integer"}}},{"$ref":"#/components/schemas/Missing"}]}}}}}}}});
+        let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
+        let request = draft.operations[0].finish();
+        assert!(
+            !request.blockers.is_empty(),
+            "an unresolvable branch leaves the body shape unknown"
+        );
+    }
+    #[test]
+    fn one_of_becomes_selectable_bodies_rather_than_a_blocker() {
+        let (labels, bodies) = body_of(json!({
+            "oneOf": [
+                {"title":"Card","type":"object","properties":{"pan":{"type":"string"}}},
+                {"type":"object","properties":{"iban":{"type":"string"}}}
+            ]
+        }));
+        assert_eq!(bodies.len(), 2, "one candidate per branch");
+        assert!(labels[0].contains("Card"), "{labels:?}");
+        assert!(labels[1].contains("oneOf option 2"), "{labels:?}");
+        assert!(bodies[0].contains("pan"));
+        assert!(bodies[1].contains("iban"));
+        // A composed body is no longer a reason to block Send.
+        let root = json!({"openapi":"3.1.0","paths":{"/":{"post":{"requestBody":{"content":{"application/json":{"schema":{"anyOf":[{"type":"object"}]}}}}}}}});
+        let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
+        assert!(draft.operations[0].finish().blockers.is_empty());
     }
     #[test]
     fn unsupported_serialization_blocks_send() {
