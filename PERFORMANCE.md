@@ -90,7 +90,7 @@ An earlier glow sample read 146.3 MiB; the current build measures 94.0 MiB on an
 
 ## Binary sizes
 
-Built without the development screenshot and bench features: desktop 13,575,168 bytes, worker 1,401,856 bytes. The packaged ZIP from `scripts/package.ps1`, which also emits `THIRD_PARTY_NOTICES.md`, is 6,525,037 bytes. The desktop binary grew by roughly 460 KB when the icon was added: a 221 KB multi-resolution `.ico` resource plus 64 KB of raw window-icon pixels.
+Built without the development screenshot and bench features: desktop 13,631,488 bytes, worker 1,401,856 bytes. The packaged ZIP from `scripts/package.ps1`, which also emits `THIRD_PARTY_NOTICES.md`, is 6,547,262 bytes. The desktop binary grew by roughly 460 KB when the icon was added: a 221 KB multi-resolution `.ico` resource plus 64 KB of raw window-icon pixels.
 
 ## Caveats on the numbers above
 
