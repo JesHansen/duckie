@@ -1744,6 +1744,106 @@ mod tests {
         // An offset that is not the start of a hit leaves a caret there instead.
         assert_eq!(char_range_at(text, 6, &found), Some(5..5));
     }
+    /// Frame construction time under input, with a thousand requests listed and a megabyte of
+    /// response on screen. This is CPU time to produce a frame, so it is a lower bound on
+    /// input-to-paint: it excludes upload, present and the compositor.
+    ///
+    /// Ignored by default; take it with
+    /// `cargo test -p duckie-desktop --release -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement"]
+    fn frame_time_under_input() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = Duckie::new(&cc);
+        let mut frame = eframe::Frame::_new_kittest();
+        app.drafts = (0..1000)
+            .map(|i| Draft {
+                request: RequestDefinition {
+                    name: format!("request {i}"),
+                    folder: format!("folder {}", i % 20),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        let id = app.drafts[0].request.id.clone();
+        let body: String = std::iter::repeat_n("{\"duck\": 1},\n", 60_000).collect();
+        app.responses.insert(
+            id.clone(),
+            ResponseView {
+                result: ExecutionResult {
+                    request_id: id,
+                    run_id: "r".into(),
+                    summary: RequestSummary {
+                        method: "GET".into(),
+                        url: "http://localhost/".into(),
+                        headers: vec![],
+                        environment: "dev".into(),
+                        revision: 0,
+                        timeout_ms: 30_000,
+                    },
+                    outcome: Outcome::Complete,
+                    status: Some(200),
+                    status_text: "OK".into(),
+                    headers: vec![],
+                    body: BodyHandle::Memory(std::sync::Arc::new(body.clone().into_bytes())),
+                    encoded_bytes: body.len() as u64,
+                    duration_ms: 1,
+                },
+                preview: body,
+                pretty: None,
+                binary: false,
+                offset: 0,
+                page: MIB,
+                search: Default::default(),
+                reveal_at: None,
+                report: None,
+                test_revision: 0,
+                environment: Values::new(),
+                viewed: 0,
+            },
+        );
+        app.response_find.query = "duck".into();
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0));
+        let mut texture_bytes = 0usize;
+        let mut samples = vec![];
+        for i in 0..40 {
+            // Every other frame carries a keystroke, so the measurement includes the work an
+            // edit triggers rather than only a repaint of unchanged state.
+            let events = if i % 2 == 0 {
+                vec![egui::Event::Text("x".into())]
+            } else {
+                vec![]
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let started = std::time::Instant::now();
+            let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+            samples.push(started.elapsed().as_micros());
+            for deltas in output.textures_delta.set.values() {
+                for delta in deltas {
+                    texture_bytes += match &delta.image {
+                        egui::epaint::ImageData::Color(image) => image.pixels.len() * 4,
+                    };
+                }
+            }
+            output.textures_delta.clear();
+        }
+        samples.sort_unstable();
+        println!(
+            "frame construction: min {} median {} p95 {} max {} microseconds (target 16 ms input-to-paint)",
+            samples[0],
+            samples[samples.len() / 2],
+            samples[samples.len() * 95 / 100],
+            samples[samples.len() - 1],
+        );
+        println!("GPU texture bytes uploaded across 40 frames: {texture_bytes}");
+    }
     #[test]
     fn page_size_shrinks_only_for_very_long_lines() {
         let wrapped: Vec<u8> = "x".repeat(79).into_bytes();

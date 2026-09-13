@@ -12,6 +12,17 @@ use std::{
 
 pub const MARKER: &str = "DUCKIE_BENCH_PATH";
 
+/// Epoch milliseconds bracketing the background collection open. Globals rather than fields so
+/// the job closure in `state.rs` does not have to carry a handle purely for measurement.
+pub static OPEN_STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static OPEN_FINISHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn mark(slot: &std::sync::atomic::AtomicU64) {
+    slot.store(now_ms() as u64, std::sync::atomic::Ordering::Release);
+}
+fn taken(slot: &std::sync::atomic::AtomicU64) -> Option<u64> {
+    Some(slot.load(std::sync::atomic::Ordering::Acquire)).filter(|v| *v > 0)
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -70,6 +81,8 @@ impl Bench {
         let report = serde_json::json!({
             "firstFrameEpochMs": self.first_frame,
             "searchableEpochMs": self.searchable,
+            "openStartedEpochMs": taken(&OPEN_STARTED),
+            "openFinishedEpochMs": taken(&OPEN_FINISHED),
             "respondedEpochMs": self.responded,
             "requests": requests,
             "settledPrivateBytes": self.settled,

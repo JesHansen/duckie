@@ -27,6 +27,8 @@ const server = http.createServer(async (req, res) => {
     // cost very different amounts to lay out, and the benchmark protocol wants both shapes.
     const body = Buffer.alloc(bytes, 97);
     if (url.searchParams.get('lines') === 'true') for (let i = 79; i < bytes; i += 80) body[i] = 10;
+    // NUL bytes make the body non-text, which is how the preview decides it is binary.
+    if (url.searchParams.get('binary') === 'true') for (let i = 0; i < bytes; i += 7) body[i] = 0;
     const gzip = url.searchParams.get('gzip') === 'true';
     res.writeHead(200, { 'content-type': 'text/plain', ...(gzip ? { 'content-encoding': 'gzip' } : {}) });
     res.end(gzip ? gzipSync(body) : body); return;

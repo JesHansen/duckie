@@ -708,11 +708,16 @@ impl Duckie {
     pub fn open_path(&mut self, path: PathBuf) {
         self.io_busy = true;
         self.background(move || {
-            IoEvent::Opened(Collection::open(if path.is_file() {
+            #[cfg(feature = "bench")]
+            crate::bench::mark(&crate::bench::OPEN_STARTED);
+            let opened = Collection::open(if path.is_file() {
                 path.parent().unwrap_or(&path)
             } else {
                 &path
-            }))
+            });
+            #[cfg(feature = "bench")]
+            crate::bench::mark(&crate::bench::OPEN_FINISHED);
+            IoEvent::Opened(opened)
         });
     }
     pub fn save_collection(&mut self, as_new: bool) {
