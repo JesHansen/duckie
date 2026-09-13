@@ -256,6 +256,18 @@ impl Duckie {
         if pressed(Modifiers::CTRL, Key::L) {
             self.focus_url = true;
         }
+        // Grab a token, hit Ctrl+T, paste — the common case of getting a fresh bearer token
+        // into the active request without hunting for the Auth tab first.
+        if pressed(Modifiers::CTRL, Key::T) {
+            self.request_tab = RequestTab::Auth;
+            if self.drafts[self.selected].request.auth.bearer.is_none() {
+                self.drafts[self.selected].request.auth.bearer = Some(SecretBinding {
+                    secret: "internalBearer".into(),
+                });
+                self.touch();
+            }
+            self.focus_token = true;
+        }
         if pressed(Modifiers::CTRL, Key::B) {
             self.prefs.sidebar = !self.prefs.sidebar;
         }
@@ -672,6 +684,8 @@ impl Duckie {
                 ui.weak("Authentication and body headers are added when you send. Duplicate manual auth headers block Send.");
             }
             RequestTab::Auth => {
+                let focus_token = self.focus_token;
+                self.focus_token = false;
                 let d = &mut self.drafts[self.selected];
                 let mut bearer = d.request.auth.bearer.is_some();
                 let mut api = d.request.auth.api_key.is_some();
@@ -705,6 +719,7 @@ impl Duckie {
                         &mut self.secrets,
                         &mut self.remember,
                         &mut self.reveal,
+                        focus_token,
                     );
                 }
                 if let Some(k) = &mut d.request.auth.api_key {
@@ -723,6 +738,7 @@ impl Duckie {
                         &mut self.secrets,
                         &mut self.remember,
                         &mut self.reveal,
+                        false,
                     );
                 }
                 ui.add_space(8.0);
@@ -1473,6 +1489,7 @@ fn secret_input(
     secrets: &mut std::collections::BTreeMap<String, Values>,
     remember: &mut std::collections::BTreeSet<(String, String)>,
     reveal: &mut bool,
+    focus: bool,
 ) -> bool {
     let mut changed = false;
     ui.push_id((env, key), |ui| {
@@ -1483,14 +1500,16 @@ fn secret_input(
             .or_default();
         ui.horizontal(|ui| {
             ui.label("Value");
-            changed |= ui
-                .add(
-                    egui::TextEdit::singleline(value)
-                        .password(!*reveal)
-                        .desired_width(430.0)
-                        .hint_text("Paste credential"),
-                )
-                .changed();
+            let field = ui.add(
+                egui::TextEdit::singleline(value)
+                    .password(!*reveal)
+                    .desired_width(430.0)
+                    .hint_text("Paste credential"),
+            );
+            changed |= field.changed();
+            if focus {
+                field.request_focus();
+            }
             ui.checkbox(reveal, "Show");
         });
         if value.is_empty() {
@@ -1759,6 +1778,64 @@ mod tests {
         assert!(app.drafts[0].dirty);
         assert!(app.responses.is_empty());
         assert!(!app.service.busy());
+    }
+    #[test]
+    fn ctrl_t_switches_to_auth_and_focuses_the_bearer_token_field() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = Duckie::new(&cc);
+        let mut frame = eframe::Frame::_new_kittest();
+        app.request_tab = RequestTab::Params;
+        assert!(app.drafts[0].request.auth.bearer.is_none());
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 820.0),
+            )),
+            events: vec![egui::Event::Key {
+                key: egui::Key::T,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+            }],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        output.textures_delta.clear();
+        assert!(app.request_tab == RequestTab::Auth);
+        // A bearer binding is created so there is a field to land in, and that is a real edit.
+        assert!(app.drafts[0].request.auth.bearer.is_some());
+        assert!(app.drafts[0].dirty);
+        // The flag is consumed the same frame the Auth tab renders, not left pending.
+        assert!(!app.focus_token);
+
+        // Pressing it again with a bearer already set must not disturb the existing binding.
+        app.drafts[0].request.auth.bearer = Some(SecretBinding {
+            secret: "existing".into(),
+        });
+        app.drafts[0].dirty = false;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 820.0),
+            )),
+            events: vec![egui::Event::Key {
+                key: egui::Key::T,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+            }],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        output.textures_delta.clear();
+        assert_eq!(
+            app.drafts[0].request.auth.bearer.as_ref().unwrap().secret,
+            "existing"
+        );
+        assert!(!app.drafts[0].dirty, "no content changed, so no new edit");
     }
     fn app_with(folders: &[&str]) -> (egui::Context, Duckie) {
         let ctx = egui::Context::default();

@@ -247,6 +247,9 @@ pub struct Duckie {
     pub delete: Option<usize>,
     pub about: bool,
     pub focus_url: bool,
+    /// Set by Ctrl+T alongside switching to the Auth tab; the Auth tab's bearer token field
+    /// claims focus on the frame it sees this set, then clears it, mirroring `focus_url`.
+    pub focus_token: bool,
     /// Bumped for every new scan; a worker whose generation no longer matches stops early.
     pub search_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Files found changed on disk, and the set already shown, so the same change is reported
@@ -312,6 +315,7 @@ impl Duckie {
             delete: None,
             about: false,
             focus_url: true,
+            focus_token: false,
             search_generation: Default::default(),
             disk_changes: vec![],
             disk_dismissed: vec![],

@@ -45,6 +45,7 @@ OpenAPI import completeness (Tier C, all four items) validated on 13 September 2
 - OpenAPI 3.0/3.1/3.2 JSON imports from local files or protected URLs into a review draft. Internal, relative local and same-origin remote references resolve transitively with rebasing, bounded at 50 documents and 20 MiB. Import handles examples, read-only omission, server precedence, security alternatives/combined requirements, `allOf` merges, and selectable `oneOf`/`anyOf` bodies.
 - Parameter serialization covers query `form`/`deepObject` objects and arrays, `spaceDelimited`/`pipeDelimited` arrays, and path `simple`/`label`/`matrix`, honoring supported `explode` combinations. Undefined forms such as arrays of objects remain blocked. URL path substitutions encode structural characters while preserving existing percent escapes and style punctuation; dot traversal segments are rejected before parsing.
 - The native UI includes dark/light/system themes, file dialogs, retained dirty drafts, grouped/collapsible folders and ordering, line-numbered editors, bounded syntax colouring, bracket matching, focused-editor find, and response snapshot labels. Editor undo buffers are not persisted.
+- **Ctrl+T** switches to the Auth tab and focuses the bearer token value field, enabling bearer auth first if the request has none, so pasting a freshly copied token is Ctrl+T, Ctrl+V.
 
 ## Remaining work, in priority order
 
