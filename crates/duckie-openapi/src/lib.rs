@@ -27,6 +27,13 @@ pub const EXTERNAL: &str = "x-duckie-external";
 /// Aggregate ceilings on reference acquisition, so one import cannot walk a whole server.
 pub const MAX_EXTERNAL_DOCUMENTS: usize = 50;
 pub const MAX_EXTERNAL_BYTES: usize = 20 * MIB as usize;
+// Parsed documents are shallow enough for this ceiling, while programmatically constructed or
+// merged Values do not get to turn this recursive metadata walk into a stack hazard.
+const MAX_EXAMPLE_METADATA_DEPTH: usize = 128;
+// A reference can reuse one small schema at every branch, so source size and recursion depth do
+// not bound the generated tree. These limits apply across all alternatives or multipart values.
+const MAX_GENERATED_EXAMPLE_NODES: usize = 50_000;
+const MAX_GENERATED_EXAMPLE_BYTES: usize = 4 * MIB as usize;
 
 /// Splits a `$ref` into its document part and its JSON pointer.
 fn split_ref(reference: &str) -> (&str, &str) {
@@ -187,33 +194,61 @@ pub fn sanitize_source(source: &str) -> String {
     url.set_fragment(None);
     url.to_string()
 }
-/// Every `externalValue` URI reachable from `root`, resolved against `base`. Mirrors
-/// `external_references`: an example can point at literal content in another file or over HTTP,
-/// separate from `$ref`, and that content has to be fetched the same deliberate way.
+/// Every Example Object `externalValue` URI reachable from `root`, resolved against `base`.
+/// Mirrors `external_references`: an example can point at literal content in another file or over
+/// HTTP, separate from `$ref`, and that content has to be fetched the same deliberate way. Literal
+/// values under `value`, `example`, and other schema value keywords are opaque data.
 pub fn external_examples(root: &Value, base: &str) -> Vec<String> {
     let mut found = BTreeSet::new();
-    collect_external_values(root, base, &mut found);
+    collect_external_values(root, base, &mut found, 0);
     found.into_iter().collect()
 }
-fn collect_external_values(value: &Value, base: &str, found: &mut BTreeSet<String>) {
+fn collect_external_values(value: &Value, base: &str, found: &mut BTreeSet<String>, depth: usize) {
+    if depth >= MAX_EXAMPLE_METADATA_DEPTH {
+        return;
+    }
     match value {
         Value::Object(map) => {
             if let Some(Value::String(uri)) = map.get("externalValue") {
                 found.insert(join_ref(base, uri));
             }
-            for child in map.values() {
-                collect_external_values(child, base, found);
+            for (key, child) in map {
+                if is_opaque_example_value(key) {
+                    continue;
+                }
+                if key == "examples" {
+                    collect_named_examples(child, base, found, depth + 1);
+                } else {
+                    collect_external_values(child, base, found, depth + 1);
+                }
             }
         }
-        Value::Array(list) => list
-            .iter()
-            .for_each(|child| collect_external_values(child, base, found)),
+        Value::Array(list) => {
+            for child in list {
+                collect_external_values(child, base, found, depth + 1);
+            }
+        }
         _ => {}
     }
+}
+fn collect_named_examples(value: &Value, base: &str, found: &mut BTreeSet<String>, depth: usize) {
+    let Some(examples) = value.as_object() else {
+        // JSON Schema's `examples` is an array of literal values, rather than a map of OpenAPI
+        // Example Objects. Literal example data must never initiate another acquisition.
+        return;
+    };
+    for example in examples.values() {
+        collect_external_values(example, base, found, depth);
+    }
+}
+fn is_opaque_example_value(key: &str) -> bool {
+    matches!(key, "value" | "example" | "default" | "const" | "enum")
 }
 /// Embeds fetched `externalValue` content as an inline `value`, so it is picked up exactly like
 /// an authored inline example. Content is parsed as JSON when possible; otherwise it is kept as
 /// the raw text, which is what a non-JSON example (CSV, plain text) needs to become a body value.
+/// Inserted and authored example values remain opaque; their fields are never interpreted as more
+/// OpenAPI metadata.
 /// Must run after `inline_external`, since an example can live inside an embedded document and
 /// its `externalValue` is relative to that document, not the root.
 pub fn inline_examples(
@@ -226,13 +261,13 @@ pub fn inline_examples(
     if let Value::Object(map) = root {
         for (key, child) in map.iter_mut() {
             if key != EXTERNAL {
-                walk_examples(child, base, fetched, &mut diagnostics);
+                walk_examples(child, base, fetched, &mut diagnostics, 0);
             }
         }
         if let Some(Value::Object(docs)) = map.get_mut(EXTERNAL) {
             for (key, doc) in docs.iter_mut() {
                 let doc_base = doc_bases.get(key).map(String::as_str).unwrap_or(base);
-                walk_examples(doc, doc_base, fetched, &mut diagnostics);
+                walk_examples(doc, doc_base, fetched, &mut diagnostics, 0);
             }
         }
     }
@@ -245,7 +280,14 @@ fn walk_examples(
     base: &str,
     fetched: &BTreeMap<String, Vec<u8>>,
     diagnostics: &mut Vec<String>,
+    depth: usize,
 ) {
+    if depth >= MAX_EXAMPLE_METADATA_DEPTH {
+        diagnostics.push(format!(
+            "OpenAPI example metadata nesting exceeds {MAX_EXAMPLE_METADATA_DEPTH}"
+        ));
+        return;
+    }
     match value {
         Value::Object(map) => {
             if let Some(Value::String(uri)) = map.get("externalValue").cloned()
@@ -262,14 +304,37 @@ fn walk_examples(
                     None => diagnostics.push(format!("External example not retrieved: {resolved}")),
                 }
             }
-            for child in map.values_mut() {
-                walk_examples(child, base, fetched, diagnostics);
+            for (key, child) in map.iter_mut() {
+                if is_opaque_example_value(key) {
+                    continue;
+                }
+                if key == "examples" {
+                    walk_named_examples(child, base, fetched, diagnostics, depth + 1);
+                } else {
+                    walk_examples(child, base, fetched, diagnostics, depth + 1);
+                }
             }
         }
-        Value::Array(list) => list
-            .iter_mut()
-            .for_each(|child| walk_examples(child, base, fetched, diagnostics)),
+        Value::Array(list) => {
+            for child in list {
+                walk_examples(child, base, fetched, diagnostics, depth + 1);
+            }
+        }
         _ => {}
+    }
+}
+fn walk_named_examples(
+    value: &mut Value,
+    base: &str,
+    fetched: &BTreeMap<String, Vec<u8>>,
+    diagnostics: &mut Vec<String>,
+    depth: usize,
+) {
+    let Some(examples) = value.as_object_mut() else {
+        return;
+    };
+    for example in examples.values_mut() {
+        walk_examples(example, base, fetched, diagnostics, depth);
     }
 }
 fn resolve<'a>(root: &'a Value, value: &'a Value, chain: &mut Vec<String>) -> Result<&'a Value> {
@@ -297,18 +362,57 @@ fn resolve<'a>(root: &'a Value, value: &'a Value, chain: &mut Vec<String>) -> Re
 fn deref<'a>(root: &'a Value, value: &'a Value) -> Result<&'a Value> {
     resolve(root, value, &mut vec![])
 }
-fn sample(root: &Value, schema: &Value, depth: usize) -> Result<Value> {
+#[derive(Default)]
+struct ExampleBudget {
+    nodes: usize,
+    bytes: usize,
+}
+impl ExampleBudget {
+    fn charge(&mut self, nodes: usize, bytes: usize) -> Result<()> {
+        let next_nodes = self.nodes.saturating_add(nodes);
+        let next_bytes = self.bytes.saturating_add(bytes);
+        if next_nodes > MAX_GENERATED_EXAMPLE_NODES || next_bytes > MAX_GENERATED_EXAMPLE_BYTES {
+            bail!("Generated example exceeds the import limit; supply body data manually");
+        }
+        self.nodes = next_nodes;
+        self.bytes = next_bytes;
+        Ok(())
+    }
+    fn charge_value(&mut self, value: &Value) -> Result<()> {
+        let mut pending = vec![value];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Null => self.charge(1, 4)?,
+                Value::Bool(value) => self.charge(1, if *value { 4 } else { 5 })?,
+                Value::Number(value) => self.charge(1, value.to_string().len())?,
+                Value::String(value) => self.charge(1, value.len())?,
+                Value::Array(values) => {
+                    self.charge(1, 0)?;
+                    pending.extend(values);
+                }
+                Value::Object(values) => {
+                    self.charge(1, values.keys().map(String::len).sum())?;
+                    pending.extend(values.values());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+fn sample(root: &Value, schema: &Value, depth: usize, budget: &mut ExampleBudget) -> Result<Value> {
     if depth > 16 {
         bail!("Example recursion exceeds 16; supply body data manually");
     }
     let schema = deref(root, schema)?;
     for key in ["example", "default", "const"] {
         if let Some(v) = schema.get(key) {
+            budget.charge_value(v)?;
             return Ok(v.clone());
         }
     }
     for key in ["examples", "enum"] {
         if let Some(v) = schema[key].as_array().and_then(|a| a.first()) {
+            budget.charge_value(v)?;
             return Ok(v.clone());
         }
     }
@@ -316,7 +420,7 @@ fn sample(root: &Value, schema: &Value, depth: usize) -> Result<Value> {
     if let Some(branches) = schema["allOf"].as_array() {
         let mut merged = serde_json::Map::new();
         for branch in branches {
-            match sample(root, branch, depth + 1)? {
+            match sample(root, branch, depth + 1, budget)? {
                 Value::Object(map) => merged.extend(map),
                 _ => {
                     bail!("allOf combines schemas that are not objects; supply body data manually")
@@ -324,14 +428,14 @@ fn sample(root: &Value, schema: &Value, depth: usize) -> Result<Value> {
             }
         }
         // Properties declared beside the allOf apply as well.
-        merged.extend(object_properties(root, schema, depth)?);
+        merged.extend(object_properties(root, schema, depth, budget)?);
         return Ok(Value::Object(merged));
     }
     // `oneOf`/`anyOf` are choices. Nested ones collapse to the first branch; a choice at the top
     // of a request body is offered to the user instead, in `variants`.
     for key in ["oneOf", "anyOf"] {
         if let Some(first) = schema[key].as_array().and_then(|list| list.first()) {
-            return sample(root, first, depth + 1);
+            return sample(root, first, depth + 1, budget);
         }
     }
     let typ = schema["type"]
@@ -347,17 +451,33 @@ fn sample(root: &Value, schema: &Value, depth: usize) -> Result<Value> {
             "string"
         });
     Ok(match typ {
-        "object" => Value::Object(object_properties(root, schema, depth)?),
-        "array" => json!([sample(root, &schema["items"], depth + 1)?]),
-        "integer" | "number" => json!(0),
-        "boolean" => json!(false),
-        "null" => Value::Null,
-        _ => json!(match schema["format"].as_str() {
-            Some("date") => "2026-01-01",
-            Some("date-time") => "2026-01-01T00:00:00Z",
-            Some("uuid") => "00000000-0000-0000-0000-000000000000",
-            _ => "example",
-        }),
+        "object" => Value::Object(object_properties(root, schema, depth, budget)?),
+        "array" => {
+            budget.charge(1, 0)?;
+            json!([sample(root, &schema["items"], depth + 1, budget)?])
+        }
+        "integer" | "number" => {
+            budget.charge(1, 1)?;
+            json!(0)
+        }
+        "boolean" => {
+            budget.charge(1, 5)?;
+            json!(false)
+        }
+        "null" => {
+            budget.charge(1, 4)?;
+            Value::Null
+        }
+        _ => {
+            let value = match schema["format"].as_str() {
+                Some("date") => "2026-01-01",
+                Some("date-time") => "2026-01-01T00:00:00Z",
+                Some("uuid") => "00000000-0000-0000-0000-000000000000",
+                _ => "example",
+            };
+            budget.charge(1, value.len())?;
+            json!(value)
+        }
     })
 }
 /// Sample values for a schema's own `properties`, omitting read-only ones, which a request body
@@ -366,13 +486,16 @@ fn object_properties(
     root: &Value,
     schema: &Value,
     depth: usize,
+    budget: &mut ExampleBudget,
 ) -> Result<serde_json::Map<String, Value>> {
+    budget.charge(1, 0)?;
     let mut object = serde_json::Map::new();
     if let Some(properties) = schema["properties"].as_object() {
         for (name, property) in properties {
             let property = deref(root, property)?;
             if property["readOnly"] != true {
-                object.insert(name.clone(), sample(root, property, depth + 1)?);
+                budget.charge(0, name.len())?;
+                object.insert(name.clone(), sample(root, property, depth + 1, budget)?);
             }
         }
     }
@@ -382,6 +505,7 @@ fn object_properties(
 /// labelled candidate per branch, so the import review can pick rather than block.
 fn variants(root: &Value, schema: &Value) -> Result<Vec<(String, Value)>> {
     let resolved = deref(root, schema)?;
+    let mut budget = ExampleBudget::default();
     for key in ["oneOf", "anyOf"] {
         if let Some(branches) = resolved[key].as_array().filter(|list| !list.is_empty()) {
             return branches
@@ -392,12 +516,12 @@ fn variants(root: &Value, schema: &Value) -> Result<Vec<(String, Value)>> {
                         .ok()
                         .and_then(|b| b["title"].as_str().map(str::to_owned))
                         .unwrap_or_else(|| format!("{key} option {}", i + 1));
-                    Ok((label, sample(root, branch, 1)?))
+                    Ok((label, sample(root, branch, 1, &mut budget)?))
                 })
                 .collect();
         }
     }
-    Ok(vec![(String::new(), sample(root, schema, 0)?)])
+    Ok(vec![(String::new(), sample(root, schema, 0, &mut budget)?)])
 }
 /// One multipart part per schema property: a `format: binary` property (or an array of them)
 /// becomes a file part awaiting a manual selection, everything else a generated text value.
@@ -407,6 +531,7 @@ fn multipart_parts(root: &Value, schema: &Value) -> Result<(Vec<Part>, Vec<Strin
     let schema = deref(root, schema)?;
     let mut parts = vec![];
     let mut diagnostics = vec![];
+    let mut budget = ExampleBudget::default();
     if let Some(properties) = schema["properties"].as_object() {
         for (name, property) in properties {
             let property = deref(root, property)?;
@@ -425,7 +550,7 @@ fn multipart_parts(root: &Value, schema: &Value) -> Result<(Vec<Part>, Vec<Strin
                     file: true,
                 });
             } else {
-                let value = sample(root, property, 1)?;
+                let value = sample(root, property, 1, &mut budget)?;
                 parts.push(Part {
                     enabled: true,
                     name: name.clone(),
@@ -1612,12 +1737,110 @@ mod tests {
         assert!(text.contains('7'), "{text}");
     }
     #[test]
+    fn fetched_example_payloads_are_opaque_even_when_they_name_external_value() {
+        let base = "https://api.test/v1/openapi.json";
+        let first = "https://api.test/v1/examples/first.json".to_string();
+        let second = "https://api.test/v1/examples/second.json".to_string();
+        let mut root = json!({
+            "openapi":"3.1.0",
+            "paths":{
+                "/":{"post":{"requestBody":{"content":{"application/json":{
+                    "examples":{"sample":{"externalValue":"examples/first.json"}}
+                }}}}}
+            }
+        });
+        let payload = json!({"externalValue":"second.json","message":"literal business data"});
+        let fetched = BTreeMap::from([
+            (first, serde_json::to_vec(&payload).unwrap()),
+            (second, br#"{"externalValue":"first.json"}"#.to_vec()),
+        ]);
+
+        let notes = inline_examples(&mut root, base, &BTreeMap::new(), &fetched);
+
+        assert!(notes.is_empty(), "{notes:?}");
+        let inserted = &root["paths"]["/"]["post"]["requestBody"]["content"]["application/json"]["examples"]
+            ["sample"]["value"];
+        assert_eq!(inserted, &payload);
+        assert!(
+            inserted.get("value").is_none(),
+            "payload was recursively expanded"
+        );
+    }
+    #[test]
+    fn authored_example_values_do_not_initiate_external_acquisition() {
+        let base = "https://api.test/v1/openapi.json";
+        let mut root = json!({
+            "openapi":"3.1.0",
+            "paths":{
+                "/":{"post":{"requestBody":{"content":{"application/json":{
+                    "example":{"externalValue":"customer-supplied text"}
+                }}}}}
+            }
+        });
+        let original = root.clone();
+
+        assert!(external_examples(&root, base).is_empty());
+        assert!(inline_examples(&mut root, base, &BTreeMap::new(), &BTreeMap::new()).is_empty());
+        assert_eq!(root, original);
+    }
+    #[test]
+    fn example_metadata_walk_has_a_depth_limit() {
+        let mut nested = json!({"externalValue":"too-deep.json"});
+        for _ in 0..MAX_EXAMPLE_METADATA_DEPTH {
+            nested = json!({"child":nested});
+        }
+        let mut root = json!({"paths":nested});
+
+        assert!(external_examples(&root, "C:/specs/api.json").is_empty());
+        let notes = inline_examples(
+            &mut root,
+            "C:/specs/api.json",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert!(notes.iter().any(|note| note.contains("nesting exceeds")));
+    }
+    #[test]
     fn an_external_example_that_was_not_retrieved_is_reported() {
         let base = "https://api.test/v1/openapi.json";
         let mut root = json!({"a":{"externalValue":"missing.json"}});
         let notes = inline_examples(&mut root, base, &BTreeMap::new(), &BTreeMap::new());
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("missing.json"), "{notes:?}");
+    }
+    #[test]
+    fn branching_schema_generation_stops_at_the_aggregate_budget() {
+        let mut schemas = serde_json::Map::new();
+        schemas.insert("Level16".into(), json!({"type":"string"}));
+        for depth in (0..16).rev() {
+            let next = format!("#/components/schemas/Level{}", depth + 1);
+            schemas.insert(
+                format!("Level{depth}"),
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "left":{"$ref":next},
+                        "right":{"$ref":next}
+                    }
+                }),
+            );
+        }
+        let root = json!({"components":{"schemas":schemas}});
+
+        let error = variants(&root, &json!({"$ref":"#/components/schemas/Level0"}))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("import limit"), "{error}");
+    }
+    #[test]
+    fn cloned_schema_examples_observe_the_generated_byte_budget() {
+        let oversized = "x".repeat(MAX_GENERATED_EXAMPLE_BYTES + 1);
+        let error = variants(&Value::Null, &json!({"example":oversized}))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("import limit"), "{error}");
     }
     #[test]
     fn plan_reimport_finds_updates_additions_and_removals() {

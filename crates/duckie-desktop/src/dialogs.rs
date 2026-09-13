@@ -6,7 +6,14 @@ use duckie_openapi::{
 };
 use duckie_storage::{Collection, SecretsFile, StoredRequest};
 use eframe::egui;
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Read,
+    path::Path,
+    time::Duration,
+};
+
+const IMPORT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Fetched `$ref` documents (parsed) and `externalValue` example content (raw bytes), keyed by
 /// resolved URI.
@@ -19,124 +26,280 @@ type Acquired = (
 /// nothing new is referenced. Bounded by document count and total bytes so a spec cannot pull in
 /// an unbounded tree. `$ref` targets must parse as the OpenAPI document structure; example
 /// content is arbitrary and kept as raw bytes.
-fn acquire_local(base: &str, root: &serde_json::Value) -> (Acquired, Vec<String>) {
+fn read_bounded(path: &Path, limit: usize) -> std::io::Result<Option<Vec<u8>>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() <= limit).then_some(bytes))
+}
+
+fn local_target(root: &Path, uri: &str) -> anyhow::Result<std::path::PathBuf> {
+    let target = std::fs::canonicalize(uri).with_context(|| format!("Cannot read {uri}"))?;
+    if !target.starts_with(root) {
+        anyhow::bail!("Reference is outside the selected specification folder: {uri}");
+    }
+    Ok(target)
+}
+
+fn acquire_local(
+    base: &str,
+    root_path: &Path,
+    root: &serde_json::Value,
+) -> (Acquired, Vec<String>) {
     let mut fetched = BTreeMap::new();
     let mut examples = BTreeMap::new();
+    let mut contents = BTreeMap::new();
     let mut notes = vec![];
     let mut budget = MAX_EXTERNAL_BYTES;
+    let mut visited = BTreeSet::new();
     let mut pending = external_references(root, base);
     let mut pending_examples = external_examples(root, base);
     while let Some(uri) = pending.pop() {
-        if fetched.contains_key(&uri) {
+        if visited.contains(&uri) {
             continue;
         }
-        if fetched.len() >= MAX_EXTERNAL_DOCUMENTS {
+        if visited.len() >= MAX_EXTERNAL_DOCUMENTS {
             notes.push(format!(
-                "Stopped after {MAX_EXTERNAL_DOCUMENTS} referenced documents"
+                "Stopped after {MAX_EXTERNAL_DOCUMENTS} external file attempts"
             ));
             break;
         }
-        match std::fs::read(&uri) {
-            Ok(bytes) if bytes.len() <= budget => match serde_json::from_slice(&bytes) {
-                Ok(document) => {
-                    budget -= bytes.len();
-                    // A fetched document's own references are relative to it, not to the root.
-                    pending.extend(external_references(&document, &uri));
-                    pending_examples.extend(external_examples(&document, &uri));
-                    fetched.insert(uri, document);
+        visited.insert(uri.clone());
+        let target = match local_target(root_path, &uri) {
+            Ok(target) => target,
+            Err(e) => {
+                notes.push(e.to_string());
+                continue;
+            }
+        };
+        match read_bounded(&target, budget) {
+            Ok(Some(bytes)) => {
+                budget -= bytes.len();
+                match serde_json::from_slice(&bytes) {
+                    Ok(document) => {
+                        // A fetched document's own references are relative to it, not to the root.
+                        pending.extend(external_references(&document, &uri));
+                        pending_examples.extend(external_examples(&document, &uri));
+                        fetched.insert(uri.clone(), document);
+                    }
+                    Err(e) => notes.push(format!("{uri}: {e}")),
                 }
-                Err(e) => notes.push(format!("{uri}: {e}")),
-            },
-            Ok(_) => notes.push(format!("{uri}: referenced documents exceed the size limit")),
+                contents.insert(uri, bytes);
+            }
+            Ok(None) => notes.push(format!("{uri}: external files exceed the size limit")),
             Err(e) => notes.push(format!("{uri}: {e}")),
         }
     }
     for uri in pending_examples {
-        if examples.contains_key(&uri) || fetched.len() + examples.len() >= MAX_EXTERNAL_DOCUMENTS {
+        if let Some(bytes) = contents.get(&uri) {
+            examples.insert(uri, bytes.clone());
             continue;
         }
-        match std::fs::read(&uri) {
-            Ok(bytes) if bytes.len() <= budget => {
+        if visited.contains(&uri) {
+            continue;
+        }
+        if visited.len() >= MAX_EXTERNAL_DOCUMENTS {
+            notes.push(format!(
+                "Stopped after {MAX_EXTERNAL_DOCUMENTS} external file attempts"
+            ));
+            break;
+        }
+        visited.insert(uri.clone());
+        let target = match local_target(root_path, &uri) {
+            Ok(target) => target,
+            Err(e) => {
+                notes.push(e.to_string());
+                continue;
+            }
+        };
+        match read_bounded(&target, budget) {
+            Ok(Some(bytes)) => {
                 budget -= bytes.len();
+                contents.insert(uri.clone(), bytes.clone());
                 examples.insert(uri, bytes);
             }
-            Ok(_) => notes.push(format!("{uri}: referenced example exceeds the size limit")),
+            Ok(None) => notes.push(format!("{uri}: external files exceed the size limit")),
             Err(e) => notes.push(format!("{uri}: {e}")),
         }
     }
     ((fetched, examples), notes)
 }
+
+#[derive(Default)]
+struct RemoteFetch {
+    bytes: Option<Vec<u8>>,
+    received: u64,
+}
+
+#[derive(Clone, Copy)]
+struct AcquisitionLimits {
+    deadline: tokio::time::Instant,
+    documents: usize,
+    bytes: u64,
+}
+
+struct RemoteAcquirer<'a> {
+    http: &'a duckie_http::HttpEngine,
+    origin: Option<url::Origin>,
+    env: &'a EnvironmentSnapshot,
+    template: &'a RequestDefinition,
+    cancel: &'a tokio_util::sync::CancellationToken,
+    deadline: tokio::time::Instant,
+}
+
 /// The same, over HTTP. Credentials given for the spec are reused, so acquisition is restricted to
 /// the spec's own origin: sending the token to another host because a document or example asked
 /// would be a credential leak the user never agreed to.
-async fn fetch_remote(
-    http: &duckie_http::HttpEngine,
-    origin: Option<&url::Origin>,
-    uri: &str,
-    budget: u64,
-    env: &EnvironmentSnapshot,
-    template: &RequestDefinition,
-) -> Option<Vec<u8>> {
-    let target = url::Url::parse(uri).ok()?;
-    if Some(&target.origin()) != origin {
-        return None;
+impl RemoteAcquirer<'_> {
+    fn check_active(&self) -> anyhow::Result<()> {
+        if self.cancel.is_cancelled() {
+            anyhow::bail!("Import cancelled");
+        }
+        if tokio::time::Instant::now() >= self.deadline {
+            anyhow::bail!("Import exceeded the overall acquisition deadline");
+        }
+        Ok(())
     }
-    let request = RequestDefinition {
-        url: uri.to_owned(),
-        auth: template.auth.clone(),
-        encoded_limit: budget.max(1),
-        decoded_limit: budget.max(1),
-        ..Default::default()
-    };
-    let prepared = prepare(&request, env, &RunBindings::default(), 0).ok()?;
-    let token = tokio_util::sync::CancellationToken::new();
-    let response = http.execute(prepared, token).await.ok()?;
-    if response.outcome != Outcome::Complete
-        || !response.status.is_some_and(|s| (200..300).contains(&s))
-    {
-        return None;
+
+    async fn fetch(&self, uri: &str, budget: u64) -> anyhow::Result<RemoteFetch> {
+        self.check_active()?;
+        let Ok(target) = url::Url::parse(uri) else {
+            return Ok(RemoteFetch::default());
+        };
+        if Some(&target.origin()) != self.origin.as_ref() {
+            return Ok(RemoteFetch::default());
+        }
+        let remaining = self
+            .deadline
+            .saturating_duration_since(tokio::time::Instant::now());
+        let request = RequestDefinition {
+            url: uri.to_owned(),
+            auth: self.template.auth.clone(),
+            encoded_limit: budget.max(1),
+            decoded_limit: budget.max(1),
+            timeout_ms: self
+                .template
+                .timeout_ms
+                .min(remaining.as_millis().try_into().unwrap_or(u64::MAX))
+                .max(1),
+            ..Default::default()
+        };
+        let Ok(prepared) = prepare(&request, self.env, &RunBindings::default(), 0) else {
+            return Ok(RemoteFetch::default());
+        };
+        let Some(response) = self.http.execute(prepared, self.cancel.clone()).await.ok() else {
+            return Ok(RemoteFetch::default());
+        };
+        if response.outcome == Outcome::Cancelled && self.cancel.is_cancelled() {
+            anyhow::bail!("Import cancelled");
+        }
+        if tokio::time::Instant::now() >= self.deadline {
+            anyhow::bail!("Import exceeded the overall acquisition deadline");
+        }
+        let received = response.encoded_bytes.max(response.body.len());
+        if response.outcome != Outcome::Complete
+            || !response.status.is_some_and(|s| (200..300).contains(&s))
+        {
+            return Ok(RemoteFetch {
+                bytes: None,
+                received,
+            });
+        }
+        Ok(RemoteFetch {
+            bytes: response.body.read(0, budget).ok(),
+            received,
+        })
     }
-    response.body.read(0, budget).ok()
 }
+
 async fn acquire_remote(
     http: &duckie_http::HttpEngine,
     base: &str,
     root: &serde_json::Value,
     env: &EnvironmentSnapshot,
     template: &RequestDefinition,
-) -> Acquired {
-    let origin = url::Url::parse(base).ok().map(|u| u.origin());
+    cancel: &tokio_util::sync::CancellationToken,
+    limits: AcquisitionLimits,
+) -> anyhow::Result<(Acquired, Vec<String>)> {
+    let acquirer = RemoteAcquirer {
+        http,
+        origin: url::Url::parse(base).ok().map(|u| u.origin()),
+        env,
+        template,
+        cancel,
+        deadline: limits.deadline,
+    };
     let mut fetched = BTreeMap::new();
     let mut examples = BTreeMap::new();
-    let mut budget = MAX_EXTERNAL_BYTES as u64;
+    let mut contents = BTreeMap::new();
+    let mut notes = vec![];
+    let mut budget = limits.bytes;
+    let mut visited = BTreeSet::new();
     let mut pending = external_references(root, base);
     let mut pending_examples = external_examples(root, base);
     while let Some(uri) = pending.pop() {
-        if fetched.contains_key(&uri) || fetched.len() >= MAX_EXTERNAL_DOCUMENTS {
+        acquirer.check_active()?;
+        if visited.contains(&uri) {
             continue;
         }
-        let Some(bytes) = fetch_remote(http, origin.as_ref(), &uri, budget, env, template).await
-        else {
-            continue;
-        };
-        if let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            budget = budget.saturating_sub(bytes.len() as u64);
-            pending.extend(external_references(&document, &uri));
-            pending_examples.extend(external_examples(&document, &uri));
-            fetched.insert(uri, document);
+        if visited.len() >= limits.documents {
+            notes.push(format!(
+                "Stopped after {} external request attempts",
+                limits.documents
+            ));
+            break;
+        }
+        visited.insert(uri.clone());
+        if budget == 0 {
+            notes.push(format!(
+                "Stopped after receiving {} bytes from external requests",
+                limits.bytes
+            ));
+            break;
+        }
+        let result = acquirer.fetch(&uri, budget).await?;
+        budget = budget.saturating_sub(result.received);
+        if let Some(bytes) = result.bytes {
+            if let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                pending.extend(external_references(&document, &uri));
+                pending_examples.extend(external_examples(&document, &uri));
+                fetched.insert(uri.clone(), document);
+            }
+            contents.insert(uri, bytes);
         }
     }
     for uri in pending_examples {
-        if examples.contains_key(&uri) || fetched.len() + examples.len() >= MAX_EXTERNAL_DOCUMENTS {
+        acquirer.check_active()?;
+        if let Some(bytes) = contents.get(&uri) {
+            examples.insert(uri, bytes.clone());
             continue;
         }
-        if let Some(bytes) = fetch_remote(http, origin.as_ref(), &uri, budget, env, template).await
-        {
-            budget = budget.saturating_sub(bytes.len() as u64);
+        if visited.contains(&uri) {
+            continue;
+        }
+        if visited.len() >= limits.documents {
+            notes.push(format!(
+                "Stopped after {} external request attempts",
+                limits.documents
+            ));
+            break;
+        }
+        visited.insert(uri.clone());
+        if budget == 0 {
+            notes.push(format!(
+                "Stopped after receiving {} bytes from external requests",
+                limits.bytes
+            ));
+            break;
+        }
+        let result = acquirer.fetch(&uri, budget).await?;
+        budget = budget.saturating_sub(result.received);
+        if let Some(bytes) = result.bytes {
+            contents.insert(uri.clone(), bytes.clone());
             examples.insert(uri, bytes);
         }
     }
-    (fetched, examples)
+    Ok(((fetched, examples), notes))
 }
 
 impl Duckie {
@@ -470,6 +633,7 @@ impl Duckie {
                 import.cancel = Some(cancel.clone());
                 self.service.runtime().spawn(async move {
                     let result = async {
+                        let deadline = tokio::time::Instant::now() + IMPORT_DEADLINE;
                         let mut request = RequestDefinition {
                             url: source,
                             encoded_limit: 20 * MIB,
@@ -492,7 +656,7 @@ impl Duckie {
                         }
                         let base = request.url.clone();
                         let prepared = prepare(&request, &env, &RunBindings::default(), 0)?;
-                        let response = http.execute(prepared, cancel).await?;
+                        let response = http.execute(prepared, cancel.clone()).await?;
                         if response.outcome != Outcome::Complete {
                             anyhow::bail!("Import failed: {}", response.outcome);
                         }
@@ -506,10 +670,22 @@ impl Duckie {
                         let bytes = response.body.read(0, 20 * MIB)?;
                         let mut root: serde_json::Value = serde_json::from_slice(&bytes)
                             .context("OpenAPI source must be valid JSON")?;
-                        let (fetched, fetched_examples) =
-                            acquire_remote(&http, &base, &root, &env, &request).await;
+                        let ((fetched, fetched_examples), mut notes) = acquire_remote(
+                            &http,
+                            &base,
+                            &root,
+                            &env,
+                            &request,
+                            &cancel,
+                            AcquisitionLimits {
+                                deadline,
+                                documents: MAX_EXTERNAL_DOCUMENTS,
+                                bytes: MAX_EXTERNAL_BYTES as u64,
+                            },
+                        )
+                        .await?;
                         let doc_bases = duckie_openapi::document_keys(&fetched);
-                        let mut notes = duckie_openapi::inline_external(&mut root, &base, &fetched);
+                        notes.extend(duckie_openapi::inline_external(&mut root, &base, &fetched));
                         notes.extend(duckie_openapi::inline_examples(
                             &mut root,
                             &base,
@@ -534,14 +710,17 @@ impl Duckie {
                 let path = std::path::PathBuf::from(&import.source);
                 self.background(move || {
                     IoEvent::Imported((|| {
-                        if std::fs::metadata(&path)?.len() > 20 * MIB {
-                            anyhow::bail!("OpenAPI file exceeds 20 MiB");
-                        }
                         let base = path.to_string_lossy().replace('\\', "/");
-                        let mut root: serde_json::Value =
-                            serde_json::from_slice(&std::fs::read(&path)?)
-                                .context("OpenAPI source must be valid JSON")?;
-                        let ((fetched, fetched_examples), mut notes) = acquire_local(&base, &root);
+                        let canonical = std::fs::canonicalize(&path)?;
+                        let root_path = canonical
+                            .parent()
+                            .context("OpenAPI source has no containing folder")?;
+                        let bytes = read_bounded(&canonical, 20 * MIB as usize)?
+                            .context("OpenAPI file exceeds 20 MiB")?;
+                        let mut root: serde_json::Value = serde_json::from_slice(&bytes)
+                            .context("OpenAPI source must be valid JSON")?;
+                        let ((fetched, fetched_examples), mut notes) =
+                            acquire_local(&base, root_path, &root);
                         let doc_bases = duckie_openapi::document_keys(&fetched);
                         notes.extend(duckie_openapi::inline_external(&mut root, &base, &fetched));
                         notes.extend(duckie_openapi::inline_examples(
@@ -650,5 +829,353 @@ impl Duckie {
         } else if let Some(token) = import.cancel {
             token.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn remote_server<F>(
+        response: F,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<String>>>,
+        Arc<tokio::sync::Notify>,
+        tokio::task::JoinHandle<()>,
+    )
+    where
+        F: Fn(&str) -> (Vec<u8>, Duration) + Send + Sync + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(tokio::sync::Notify::new());
+        let recorded = requests.clone();
+        let notify = seen.clone();
+        let response = Arc::new(response);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let response = response.clone();
+                let recorded = recorded.clone();
+                let notify = notify.clone();
+                tokio::spawn(async move {
+                    let mut input = vec![0; 4096];
+                    let Ok(read) = socket.read(&mut input).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&input[..read]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_owned();
+                    recorded.lock().unwrap().push(path.clone());
+                    notify.notify_one();
+                    let (body, delay) = response(&path);
+                    tokio::time::sleep(delay).await;
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(headers.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                });
+            }
+        });
+        (format!("http://{address}"), requests, seen, task)
+    }
+
+    fn remote_template() -> RequestDefinition {
+        RequestDefinition {
+            proxy: ProxyMode::Direct,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn local_acquisition_stays_inside_the_selected_spec_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let specs = temp.path().join("specs");
+        std::fs::create_dir(&specs).unwrap();
+        std::fs::write(specs.join("inside.txt"), b"inside").unwrap();
+        std::fs::write(temp.path().join("outside.txt"), b"outside").unwrap();
+        let base = specs
+            .join("openapi.json")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root = serde_json::json!({
+            "examples": {
+                "inside": {"externalValue": "inside.txt"},
+                "outside": {"externalValue": "../outside.txt"}
+            }
+        });
+
+        let ((_, examples), notes) =
+            acquire_local(&base, &std::fs::canonicalize(&specs).unwrap(), &root);
+
+        let inside = duckie_openapi::join_ref(&base, "inside.txt");
+        let outside = duckie_openapi::join_ref(&base, "../outside.txt");
+        assert_eq!(examples.get(&inside).unwrap(), b"inside");
+        assert!(!examples.contains_key(&outside));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("outside the selected"))
+        );
+    }
+
+    #[test]
+    fn bounded_file_read_does_not_return_an_oversized_file() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), b"123456789").unwrap();
+        assert!(read_bounded(temp.path(), 8).unwrap().is_none());
+    }
+
+    #[test]
+    fn local_uri_can_supply_a_reference_and_an_example_with_one_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = br#"{"type":"string"}"#;
+        std::fs::write(temp.path().join("shared.json"), shared).unwrap();
+        let base = temp
+            .path()
+            .join("openapi.json")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root = serde_json::json!({
+            "components": {
+                "schemas": {"shared": {"$ref": "shared.json"}},
+                "examples": {"shared": {"externalValue": "shared.json"}}
+            }
+        });
+
+        let ((documents, examples), _) =
+            acquire_local(&base, &std::fs::canonicalize(temp.path()).unwrap(), &root);
+
+        let uri = duckie_openapi::join_ref(&base, "shared.json");
+        assert!(documents.contains_key(&uri));
+        assert_eq!(examples.get(&uri).unwrap(), shared);
+    }
+
+    #[tokio::test]
+    async fn failed_remote_fetches_count_toward_the_attempt_limit() {
+        let (origin, requests, _, server) =
+            remote_server(|_| (b"not json".to_vec(), Duration::ZERO)).await;
+        let references: Vec<_> = (0..6)
+            .map(|i| serde_json::json!({"$ref": format!("/bad-{i}.json")}))
+            .collect();
+        let root = serde_json::json!({"references": references});
+        let base = format!("{origin}/openapi.json");
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let ((fetched, _), notes) = acquire_remote(
+            &duckie_http::HttpEngine::default(),
+            &base,
+            &root,
+            &EnvironmentSnapshot::default(),
+            &remote_template(),
+            &cancel,
+            AcquisitionLimits {
+                deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                documents: 3,
+                bytes: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+        server.abort();
+        assert!(fetched.is_empty());
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("3 external request attempts"))
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_remote_bodies_consume_the_byte_budget() {
+        let (origin, requests, _, server) =
+            remote_server(|_| (b"xxxxx".to_vec(), Duration::ZERO)).await;
+        let root = serde_json::json!({
+            "references": [
+                {"$ref": "/one.json"},
+                {"$ref": "/two.json"}
+            ]
+        });
+        let base = format!("{origin}/openapi.json");
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let (_, notes) = acquire_remote(
+            &duckie_http::HttpEngine::default(),
+            &base,
+            &root,
+            &EnvironmentSnapshot::default(),
+            &remote_template(),
+            &cancel,
+            AcquisitionLimits {
+                deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                documents: 10,
+                bytes: 5,
+            },
+        )
+        .await
+        .unwrap();
+
+        server.abort();
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(notes.iter().any(|note| note.contains("receiving 5 bytes")));
+    }
+
+    #[tokio::test]
+    async fn failed_remote_uri_is_visited_only_once() {
+        let (origin, requests, _, server) = remote_server(|path| {
+            if matches!(path, "/a.json" | "/b.json") {
+                (br#"{"$ref":"/fail.json"}"#.to_vec(), Duration::ZERO)
+            } else {
+                (b"x".to_vec(), Duration::ZERO)
+            }
+        })
+        .await;
+        let root = serde_json::json!({
+            "references": [{"$ref": "/a.json"}, {"$ref": "/b.json"}]
+        });
+        let base = format!("{origin}/openapi.json");
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        acquire_remote(
+            &duckie_http::HttpEngine::default(),
+            &base,
+            &root,
+            &EnvironmentSnapshot::default(),
+            &remote_template(),
+            &cancel,
+            AcquisitionLimits {
+                deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                documents: 10,
+                bytes: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+        server.abort();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.iter().filter(|path| *path == "/fail.json").count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_uri_can_supply_a_reference_and_an_example_with_one_request() {
+        let shared = br#"{"type":"string"}"#;
+        let (origin, requests, _, server) =
+            remote_server(move |_| (shared.to_vec(), Duration::ZERO)).await;
+        let root = serde_json::json!({
+            "components": {
+                "schemas": {"shared": {"$ref": "/shared.json"}},
+                "examples": {"shared": {"externalValue": "/shared.json"}}
+            }
+        });
+        let base = format!("{origin}/openapi.json");
+        let uri = format!("{origin}/shared.json");
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let ((documents, examples), _) = acquire_remote(
+            &duckie_http::HttpEngine::default(),
+            &base,
+            &root,
+            &EnvironmentSnapshot::default(),
+            &remote_template(),
+            &cancel,
+            AcquisitionLimits {
+                deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                documents: 10,
+                bytes: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+        server.abort();
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(documents.contains_key(&uri));
+        assert_eq!(examples.get(&uri).unwrap(), shared);
+    }
+
+    #[tokio::test]
+    async fn overall_deadline_stops_external_acquisition_before_a_request() {
+        let (origin, requests, _, server) =
+            remote_server(|_| (b"{}".to_vec(), Duration::ZERO)).await;
+        let root = serde_json::json!({"$ref": "/late.json"});
+        let base = format!("{origin}/openapi.json");
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let error = acquire_remote(
+            &duckie_http::HttpEngine::default(),
+            &base,
+            &root,
+            &EnvironmentSnapshot::default(),
+            &remote_template(),
+            &cancel,
+            AcquisitionLimits {
+                deadline: tokio::time::Instant::now(),
+                documents: 10,
+                bytes: 100,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        server.abort();
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(error.to_string().contains("deadline"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_reaches_an_external_fetch() {
+        let (origin, _, request_started, server) =
+            remote_server(|_| (b"{}".to_vec(), Duration::from_secs(5))).await;
+        let root = serde_json::json!({"$ref": "/slow.json"});
+        let base = format!("{origin}/openapi.json");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let http = duckie_http::HttpEngine::default();
+        let env = EnvironmentSnapshot::default();
+        let template = remote_template();
+        let acquisition = acquire_remote(
+            &http,
+            &base,
+            &root,
+            &env,
+            &template,
+            &cancel,
+            AcquisitionLimits {
+                deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+                documents: 10,
+                bytes: 100,
+            },
+        );
+        tokio::pin!(acquisition);
+        tokio::select! {
+            result = &mut acquisition => panic!("acquisition completed before cancellation: {result:?}"),
+            _ = request_started.notified() => {}
+        }
+        cancel.cancel();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), &mut acquisition)
+            .await
+            .expect("cancellation should promptly stop the fetch")
+            .unwrap_err();
+
+        server.abort();
+        assert!(error.to_string().contains("cancelled"));
     }
 }

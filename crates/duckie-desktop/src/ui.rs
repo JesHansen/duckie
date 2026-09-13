@@ -57,6 +57,7 @@ pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
                         .changed();
                     if edit {
                         row.raw = None;
+                        row.raw_is_literal = false;
                         changed = true;
                     }
                     if ui.small_button("×").on_hover_text("Remove row").clicked() {
@@ -1488,7 +1489,7 @@ impl Duckie {
             match url_join(&base, &value) {
                 Ok(url) => {
                     self.new_request();
-                    self.drafts[self.selected].request.set_address(&url);
+                    self.drafts[self.selected].request.set_literal_address(&url);
                     self.drafts[self.selected].request.name = "Redirect location".into();
                     self.touch();
                 }

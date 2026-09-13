@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -113,11 +113,21 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 fn disk_hash(path: &Path) -> Result<Option<String>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(hash(&bytes))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut digest = Sha256::new();
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&chunk[..read]);
     }
+    Ok(Some(format!("{:x}", digest.finalize())))
 }
 pub fn managed_path(root: &Path, relative: &str) -> Result<PathBuf> {
     resolve(&root.canonicalize()?, relative)
@@ -157,11 +167,12 @@ fn resolve(root: &Path, relative: &str) -> Result<PathBuf> {
 fn read_many<T: Send>(
     root: &Path,
     names: &[String],
+    limit: impl Fn(&str) -> u64 + Sync,
     f: impl Fn(Vec<u8>) -> T + Sync,
 ) -> Vec<Result<T>> {
     let read = |name: &String| -> Result<T> {
         let path = resolve(root, name)?;
-        let bytes = fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))?;
+        let bytes = read_limited(&path, limit(name))?;
         Ok(f(bytes))
     };
     let threads = std::thread::available_parallelism()
@@ -183,8 +194,23 @@ fn read_many<T: Send>(
     });
     out
 }
+fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = File::open(path).with_context(|| format!("Cannot read {}", path.display()))?;
+    read_limited_from(file, path, limit)
+}
+fn read_limited_from(reader: impl Read, path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("Cannot read {}", path.display()))?;
+    if bytes.len() as u64 > limit {
+        bail!("{} exceeds {} MiB", path.display(), limit.div_ceil(MIB));
+    }
+    Ok(bytes)
+}
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let bytes = fs::read(path).with_context(|| format!("Cannot read {}", path.display()))?;
+    let bytes = read_limited(path, 20 * MIB)?;
     serde_json::from_value(document(&bytes, path)?)
         .with_context(|| format!("Unexpected contents in {}", path.display()))
 }
@@ -323,9 +349,10 @@ impl Collection {
         let names = result.manifest.requests.clone();
         let mut documents = Vec::with_capacity(names.len());
         let mut attachments = vec![];
-        for (relative, value) in names
-            .iter()
-            .zip(read_many(&result.root, &names, |bytes| bytes))
+        for (relative, value) in
+            names
+                .iter()
+                .zip(read_many(&result.root, &names, |_| 20 * MIB, |bytes| bytes))
         {
             let bytes = value?;
             let value = document(&bytes, &result.path(relative)?)?;
@@ -341,26 +368,19 @@ impl Collection {
         }
         // Hashed and discarded within the same read, one file at a time per thread: a large
         // batch of attachments is never resident all at once just to be thrown away afterward.
-        for (relative, hashed) in
-            attachments
-                .iter()
-                .zip(read_many(&result.root, &attachments, |bytes| {
-                    (bytes.len() as u64, hash(&bytes))
-                }))
-        {
-            let (len, digest) = hashed?;
-            let limit = if relative.starts_with("bodies/") {
-                20 * MIB
-            } else {
-                MIB
-            };
-            if len > limit {
-                bail!(
-                    "{relative} exceeds {} MiB; use File body mode or shorten the test",
-                    limit / MIB
-                );
-            }
-            result.hashes.insert(relative.clone(), Some(digest));
+        for (relative, hashed) in attachments.iter().zip(read_many(
+            &result.root,
+            &attachments,
+            |relative| {
+                if relative.starts_with("bodies/") {
+                    20 * MIB
+                } else {
+                    MIB
+                }
+            },
+            |bytes| hash(&bytes),
+        )) {
+            result.hashes.insert(relative.clone(), Some(hashed?));
         }
         let mut ids = std::collections::HashSet::new();
         for mut value in documents {
@@ -388,7 +408,7 @@ impl Collection {
                 let entry = entry?;
                 if entry.path().extension().is_some_and(|x| x == "json") {
                     let relative = format!("environments/{}", entry.file_name().to_string_lossy());
-                    let bytes = result.read_tracked(&relative)?;
+                    let bytes = result.read_tracked(&relative, 20 * MIB)?;
                     let path = result.path(&relative)?;
                     result
                         .environments
@@ -422,9 +442,9 @@ impl Collection {
         self.hashes.insert(relative.into(), Some(hash(bytes)));
     }
     /// Reads a managed file once and records its hash from the same bytes.
-    fn read_tracked(&mut self, relative: &str) -> Result<Vec<u8>> {
+    fn read_tracked(&mut self, relative: &str, limit: u64) -> Result<Vec<u8>> {
         let path = self.path(relative)?;
-        let bytes = fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))?;
+        let bytes = read_limited(&path, limit)?;
         self.track_bytes(relative, &bytes);
         Ok(bytes)
     }
@@ -444,17 +464,20 @@ impl Collection {
         }
         let tests_file = self.requests[index].definition.tests.file.clone();
         let body_file = self.requests[index].body_file.clone();
-        let read = |relative: &str| -> Result<String> {
-            let bytes = fs::read(self.path(relative)?)
+        let read = |relative: &str, limit| -> Result<String> {
+            let bytes = read_limited(&self.path(relative)?, limit)
                 .with_context(|| format!("Cannot read {relative}"))?;
             Ok(String::from_utf8_lossy(&bytes).into_owned())
         };
         let source = if tests_file.is_empty() {
             String::new()
         } else {
-            read(&tests_file)?
+            read(&tests_file, MIB)?
         };
-        let body_text = body_file.as_deref().map(read).transpose()?;
+        let body_text = body_file
+            .as_deref()
+            .map(|relative| read(relative, 20 * MIB))
+            .transpose()?;
         let req = &mut self.requests[index];
         req.source = source;
         if let Some(text) = body_text {
@@ -596,6 +619,25 @@ pub fn export_secrets(path: &Path, secrets: &SecretsFile) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_reads_stop_after_the_limit_probe() {
+        struct CountingReader {
+            bytes_read: usize,
+        }
+        impl Read for CountingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                buffer.fill(b'x');
+                self.bytes_read += buffer.len();
+                Ok(buffer.len())
+            }
+        }
+
+        let mut reader = CountingReader { bytes_read: 0 };
+        let error = read_limited_from(&mut reader, Path::new("oversized"), 8).unwrap_err();
+        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert_eq!(reader.bytes_read, 9, "the reader must stop at limit + 1");
+    }
+
     #[test]
     fn roundtrip_separation_and_conflict() {
         let dir = tempfile::tempdir().unwrap();
@@ -847,6 +889,33 @@ mod tests {
         opened.ensure_loaded("with-extras").unwrap();
         opened.ensure_loaded("does-not-exist").unwrap();
     }
+    #[test]
+    fn lazy_loading_rechecks_attachment_size_with_a_bounded_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Collection::new(dir.path().into(), "Example".into()).unwrap();
+        c.requests.push(StoredRequest::new(
+            RequestDefinition {
+                id: "growing".into(),
+                body: Body::Json { text: "{}".into() },
+                ..Default::default()
+            },
+            String::new(),
+        ));
+        c.save().unwrap();
+
+        let mut opened = Collection::open(dir.path()).unwrap();
+        let body = File::options()
+            .write(true)
+            .open(dir.path().join("bodies/growing.json"))
+            .unwrap();
+        body.set_len(20 * MIB + 1).unwrap();
+        drop(body);
+
+        let error = opened.ensure_loaded("growing").unwrap_err();
+        assert!(format!("{error:#}").contains("exceeds 20 MiB"), "{error:#}");
+        assert!(!opened.requests[0].loaded);
+    }
+
     #[test]
     fn a_request_with_no_body_file_and_no_tests_needs_nothing_deferred() {
         // Duckie's own `save` always assigns a test file, so this shape — inline body text, no

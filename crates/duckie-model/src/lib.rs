@@ -28,6 +28,9 @@ pub struct Row {
     /// Original encoded query component; discarded only when that row is edited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    /// Response-derived query data stays literal until the row is edited.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub raw_is_literal: bool,
     #[serde(default, flatten)]
     pub extra: Extensions,
 }
@@ -38,6 +41,7 @@ impl Row {
             name: name.into(),
             value: value.into(),
             raw: None,
+            raw_is_literal: false,
             extra: Extensions::new(),
         }
     }
@@ -179,6 +183,14 @@ impl RequestDefinition {
         }
     }
     pub fn set_address(&mut self, address: &str) {
+        self.set_address_with_literal_query(address, false);
+    }
+    /// Sets a response-derived destination without granting its decoded query data template
+    /// semantics. Editing a row discards `raw`, which makes the edited value behave normally.
+    pub fn set_literal_address(&mut self, address: &str) {
+        self.set_address_with_literal_query(address, true);
+    }
+    fn set_address_with_literal_query(&mut self, address: &str, literal_query: bool) {
         // Braces are accepted in templates. Split at a literal '?' only; fragments are validated at preparation.
         if let Some((base, query)) = address.split_once('?') {
             self.url = base.into();
@@ -191,6 +203,7 @@ impl RequestDefinition {
                         .unwrap_or_default();
                     let mut row = Row::new(name, value);
                     row.raw = Some(raw.into());
+                    row.raw_is_literal = literal_query;
                     row
                 })
                 .collect();
@@ -515,9 +528,10 @@ pub fn prepare(
         for row in req.query.iter().filter(|r| r.enabled) {
             // Re-encode templated rows after substitution, preserving untouched literal bytes.
             if let Some(raw) = &row.raw
-                && !raw.contains("{{")
-                && !row.name.contains("{{")
-                && !row.value.contains("{{")
+                && (row.raw_is_literal
+                    || (!raw.contains("{{")
+                        && !row.name.contains("{{")
+                        && !row.value.contains("{{")))
             {
                 query.push(raw.clone());
             } else {
@@ -869,6 +883,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.url, r.address());
+    }
+    #[test]
+    fn redirect_query_cannot_acquire_secret_template_semantics() {
+        let mut env = EnvironmentSnapshot {
+            name: "dev".into(),
+            ..Default::default()
+        };
+        env.secrets.insert("token".into(), "dummy-secret".into());
+
+        for location in [
+            "/next?token={{secret.token}}",
+            "/next?token=%7B%7Bsecret.token%7D%7D",
+        ] {
+            let destination = resolve_location("https://example.test/start", location).unwrap();
+            let mut request = RequestDefinition::default();
+            request.set_literal_address(&destination);
+
+            assert!(request.auth.bearer.is_none());
+            assert!(request.auth.api_key.is_none());
+            assert_eq!(request.query[0].value, "{{secret.token}}");
+            assert!(request.query[0].raw_is_literal);
+
+            // Saving and reopening the draft must not silently grant the response template
+            // semantics later.
+            let saved = serde_json::to_string(&request).unwrap();
+            let reopened: RequestDefinition = serde_json::from_str(&saved).unwrap();
+            let prepared = prepare(&reopened, &env, &RunBindings::default(), 1).unwrap();
+            assert_eq!(prepared.url, destination);
+            assert!(!prepared.url.contains("dummy-secret"));
+            assert!(prepared.headers.is_empty());
+        }
     }
     #[test]
     fn url_path_substitutions_are_encoded_without_changing_other_components() {
