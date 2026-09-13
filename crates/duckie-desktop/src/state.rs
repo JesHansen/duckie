@@ -92,6 +92,11 @@ pub struct Draft {
     pub revision: u64,
     pub dirty: bool,
     pub error: String,
+    /// True only right after `use_collection`, for a request whose body/test content
+    /// `Collection::open` deferred reading. Cleared by `Duckie::ensure_loaded`, which every
+    /// frame calls for the selected draft and which `save_collection` calls for every draft
+    /// before it writes anything, so a request is never saved with placeholder content.
+    pub pending: bool,
 }
 /// Whole-body search results. Offsets are absolute byte positions in the response body, so they
 /// stay meaningful across page changes, unlike the per-page hits the editor highlights.
@@ -461,6 +466,12 @@ impl Duckie {
         if self.active.is_some() || self.service.busy() {
             return;
         }
+        // Belt and suspenders: the per-frame check in `ui` already loads the selected draft
+        // before this can run, but Send must never fire on a deferred placeholder body.
+        if self.drafts[self.selected].pending {
+            let id = self.drafts[self.selected].request.id.clone();
+            self.ensure_loaded(&id);
+        }
         let env = self.snapshot();
         let d = &self.drafts[self.selected];
         let result = prepare(&d.request, &env, &RunBindings::default(), d.revision).and_then(|p| {
@@ -824,6 +835,7 @@ impl Duckie {
                 revision: 0,
                 dirty: false,
                 error: String::new(),
+                pending: !r.loaded,
             })
             .collect();
         if self.drafts.is_empty() {
@@ -871,8 +883,51 @@ impl Duckie {
             IoEvent::Opened(opened)
         });
     }
+    /// Fills in a request's real body and test content if `Collection::open` deferred reading
+    /// it — a cheap no-op once already loaded. Called every frame for the selected draft, and
+    /// for every draft before `save_collection` writes anything, so a request already saved
+    /// with real content is never overwritten with the empty placeholder it opened with.
+    pub fn ensure_loaded(&mut self, id: &str) {
+        if !self.drafts.iter().any(|d| d.request.id == id && d.pending) {
+            return;
+        }
+        let Some(collection) = &mut self.collection else {
+            return;
+        };
+        if let Err(e) = collection.ensure_loaded(id) {
+            self.status = format!("Could not load {id}: {e}");
+            return;
+        }
+        let Some(stored) = collection.requests.iter().find(|r| r.definition.id == id) else {
+            return;
+        };
+        let source = stored.source.clone();
+        let body = stored.definition.body.clone();
+        if let Some(draft) = self.drafts.iter_mut().find(|d| d.request.id == id) {
+            draft.source = source;
+            draft.request.body = body;
+            draft.pending = false;
+        }
+    }
     pub fn save_collection(&mut self, as_new: bool) {
         if self.io_busy {
+            return;
+        }
+        for id in self
+            .drafts
+            .iter()
+            .filter(|d| d.pending)
+            .map(|d| d.request.id.clone())
+            .collect::<Vec<_>>()
+        {
+            self.ensure_loaded(&id);
+        }
+        if let Some(d) = self.drafts.iter().find(|d| d.pending) {
+            self.status = format!(
+                "Could not load \"{}\" before saving; nothing was written.",
+                d.request.name
+            );
+            self.after_save = None;
             return;
         }
         let mut collection = match self.collection.as_ref().filter(|_| !as_new) {
@@ -904,10 +959,7 @@ impl Duckie {
         collection.requests = self
             .drafts
             .iter()
-            .map(|d| StoredRequest {
-                definition: d.request.clone(),
-                source: d.source.clone(),
-            })
+            .map(|d| StoredRequest::new(d.request.clone(), d.source.clone()))
             .collect();
         collection.environments = self.envs.clone();
         for (env, key) in &self.remember {

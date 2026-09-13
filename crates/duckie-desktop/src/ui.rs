@@ -1537,6 +1537,12 @@ impl eframe::App for Duckie {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll();
+        if let Some(draft) = self.drafts.get(self.selected)
+            && draft.pending
+        {
+            let id = draft.request.id.clone();
+            self.ensure_loaded(&id);
+        }
         if !self.io_busy && self.pending.is_none() && self.import.is_none() && !self.env_dialog {
             self.shortcuts(&ctx);
         }
@@ -1837,6 +1843,62 @@ mod tests {
         );
         assert!(!app.drafts[0].dirty, "no content changed, so no new edit");
     }
+    #[test]
+    fn lazy_loaded_requests_hydrate_on_selection_and_before_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = duckie_storage::Collection::new(dir.path().to_path_buf(), "c".into()).unwrap();
+        for id in ["one", "two"] {
+            c.requests.push(duckie_storage::StoredRequest::new(
+                RequestDefinition {
+                    id: id.into(),
+                    body: Body::Json {
+                        text: format!("{{\"id\":\"{id}\"}}"),
+                    },
+                    ..Default::default()
+                },
+                format!("test('{id}', () => {{}});"),
+            ));
+        }
+        c.save().unwrap();
+
+        let opened = duckie_storage::Collection::open(dir.path()).unwrap();
+        assert!(opened.requests.iter().all(|r| !r.loaded));
+
+        let ctx = egui::Context::default();
+        let mut app = Duckie::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.use_collection(opened);
+        assert!(app.drafts[0].pending && app.drafts[1].pending);
+        assert!(app.drafts[0].source.is_empty());
+
+        // A frame with drafts[0] selected loads only that one draft.
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 820.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        output.textures_delta.clear();
+        assert!(!app.drafts[0].pending, "the selected draft loads");
+        assert!(app.drafts[1].pending, "an unselected draft stays deferred");
+        assert_eq!(app.drafts[0].source, "test('one', () => {});");
+        match &app.drafts[0].request.body {
+            Body::Json { text } => assert_eq!(text, "{\"id\":\"one\"}"),
+            other => panic!("expected Json, {}", serde_json::to_string(other).unwrap()),
+        }
+
+        // save_collection hydrates every remaining pending draft up front, before it ever builds
+        // the write set — a request must never be saved with the empty placeholder it opened
+        // with just because it was never selected.
+        app.save_collection(false);
+        assert!(
+            !app.drafts[1].pending,
+            "save must hydrate every draft, not only the selected one"
+        );
+        assert_eq!(app.drafts[1].source, "test('two', () => {});");
+    }
     fn app_with(folders: &[&str]) -> (egui::Context, Duckie) {
         let ctx = egui::Context::default();
         let mut app = Duckie::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
@@ -1910,12 +1972,14 @@ mod tests {
             duckie_storage::Collection::new(dir.path().to_path_buf(), "c".into()).unwrap();
         collection.requests = ["a", "b", "c"]
             .iter()
-            .map(|id| duckie_storage::StoredRequest {
-                definition: RequestDefinition {
-                    id: (*id).into(),
-                    ..Default::default()
-                },
-                source: String::new(),
+            .map(|id| {
+                duckie_storage::StoredRequest::new(
+                    RequestDefinition {
+                        id: (*id).into(),
+                        ..Default::default()
+                    },
+                    String::new(),
+                )
             })
             .collect();
         collection.environments = ["dev", "staging"]
@@ -2067,14 +2131,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut collection =
             duckie_storage::Collection::new(dir.path().to_path_buf(), "c".into()).unwrap();
-        collection.requests.push(duckie_storage::StoredRequest {
-            definition: RequestDefinition {
+        collection.requests.push(duckie_storage::StoredRequest::new(
+            RequestDefinition {
                 id: "one".into(),
                 name: "Fetch a duck".into(),
                 ..Default::default()
             },
-            source: String::new(),
-        });
+            String::new(),
+        ));
         collection.save().unwrap();
 
         let ctx = egui::Context::default();

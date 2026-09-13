@@ -77,6 +77,20 @@ Holding the shape single-line and varying the body from 1 MiB to 50 MiB left the
 
 The preview page is now sized to its content — under 4 KiB per line keeps the full 1 MiB page, longer lines page in 128 KiB steps — which brought the case to 25.1 MiB, inside the budget, leaving multi-line untouched. Each page is still one text widget, so selection and copy across a page are unchanged.
 
+### Deferred body/test loading, 13 September 2026
+
+`Collection::open` used to read every body and test file into memory regardless of whether the request was ever viewed. It now hashes and discards them during open (for conflict detection) and reads the real content again from disk only when a request is first selected or sent (`ensure_loaded`). This is a single manual before/after comparison, not the p95 protocol above: one bench-instrumented trial per configuration, opening `fixtures/collection-10k` (10,000 requests, 2,000 of them with a 2+ KiB JSON body and a small test, matching the `hasExtra` fixture split).
+
+| Configuration | Peak private bytes | Private bytes after a 300 ms settle |
+| --- | ---: | ---: |
+| Eager (every request hydrated at open, simulating the prior behaviour) | 151.7 MiB | 151.7 MiB |
+| Deferred (this change) | 143.8 MiB | 143.5 MiB |
+| Delta | **~8.0 MiB** | **~8.3 MiB** |
+
+The first attempt at this comparison showed almost no difference (~3 MiB), which turned out to be a real finding about the measurement, not the feature: the attachment-reading pass batched every file's bytes into one `Vec` before discarding any of them, so the transient peak was close to the eager case regardless of what was kept afterward. `read_many` now applies its per-file transform (a hash, for this pass) at the point each file is read, so a large batch is never resident all at once — this is what the table above measures, and it is also a cheaper API when a caller genuinely never needs the bytes back.
+
+Two caveats: 20% of requests carrying an extra file is this fixture's shape, not a general ratio, and process-level peak/current-after-settle readings carry more run-to-run noise than the p95 figures above, which average many trials. Restore *time* is essentially unaffected — the same files are still read and hashed at open either way — matching the existing caution that this work targets memory, not the restore-time budget.
+
 ### What the frame number does and does not include
 
 Frame construction is CPU time to produce a frame, measured headlessly with a keystroke on every other frame, a 1,000-request sidebar, and a syntax-coloured response with an active find. The size is the worst case that still colours, just under the 64 KiB cap; a 1 MiB page draws plain and costs 3.6 ms. Colouring is what makes the difference — the same megabyte cost 73 ms per frame when coloured, which is why the cap exists: 25 KiB measured 3.7 ms, 50 KiB 7.2 ms, 100 KiB 12.9 ms and 200 KiB 28.6 ms. It excludes texture upload, present and the compositor, so the reported p95 7.0 ms is a lower bound on input-to-paint, not proof that the full 16 ms target passes. The notes also report a 20.9 ms maximum attributed to first-frame font-atlas construction.

@@ -95,12 +95,22 @@ fn shipped_example_collection_passes_against_the_fixture_server() {
             "Node.js is required for this end-to-end test; install Node or run it on a machine that has it"
         );
     };
-    let collection = Collection::open(&root.join("examples/local-api")).unwrap();
+    let mut collection = Collection::open(&root.join("examples/local-api")).unwrap();
     assert_eq!(
         collection.requests.len(),
         2,
         "fixture request count changed"
     );
+    // Body and test content is deferred at open; this end-to-end pass needs both to send and
+    // to evaluate assertions, so load every request up front rather than on first UI visit.
+    for id in collection
+        .requests
+        .iter()
+        .map(|r| r.definition.id.clone())
+        .collect::<Vec<_>>()
+    {
+        collection.ensure_loaded(&id).unwrap();
+    }
 
     // The checked-in environment points at the documented default port; retarget the ephemeral one.
     let mut environment = collection

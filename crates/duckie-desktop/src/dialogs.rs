@@ -572,10 +572,7 @@ impl Duckie {
                         .operations
                         .iter()
                         .filter(|op| op.selected)
-                        .map(|op| StoredRequest {
-                            definition: op.finish(),
-                            source: String::new(),
-                        })
+                        .map(|op| StoredRequest::new(op.finish(), String::new()))
                         .collect();
                     collection.environments[0]
                         .values
@@ -616,6 +613,7 @@ impl Duckie {
                         revision: 0,
                         dirty: true,
                         error: String::new(),
+                        pending: false,
                     });
                 }
             }

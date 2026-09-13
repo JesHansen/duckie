@@ -40,6 +40,27 @@ impl Default for SecretsFile {
 pub struct StoredRequest {
     pub definition: RequestDefinition,
     pub source: String,
+    /// False when `source` and any file-backed body text are placeholders rather than the
+    /// file's real content. `Collection::open` defers reading every body and test file so a
+    /// large collection's restore does not hold all of them in memory at once; `ensure_loaded`
+    /// fills in the real content for one request on first real use (viewing or sending it).
+    pub loaded: bool,
+    /// The body file this request's `body` text was read from, if any, kept only so
+    /// `ensure_loaded` can find it again — parsing already removes `file` from `body` itself.
+    body_file: Option<String>,
+}
+impl StoredRequest {
+    /// A request whose `definition` and `source` are already the real content — the shape every
+    /// caller outside this crate needs: a freshly imported or edited request has no file to defer
+    /// reading from yet.
+    pub fn new(definition: RequestDefinition, source: String) -> Self {
+        Self {
+            definition,
+            source,
+            loaded: true,
+            body_file: None,
+        }
+    }
 }
 #[derive(Clone)]
 pub struct Collection {
@@ -123,16 +144,25 @@ fn resolve(root: &Path, relative: &str) -> Result<PathBuf> {
     }
     Ok(path)
 }
-/// Resolves and reads many managed files, preserving order.
+/// Resolves, reads and transforms many managed files in parallel, preserving order. `f` runs
+/// right where each file is read, before its bytes cross back to the caller — so a caller that
+/// only needs a hash, say, never has the whole batch's raw bytes resident at once just to
+/// discard them a moment later, the way collecting every `Vec<u8>` first and mapping afterward
+/// would.
 ///
 /// Opening a collection is syscall-bound rather than CPU-bound: each file costs a path
 /// validation and a read, and on Windows every open also pays antivirus filtering. Spreading
 /// that across threads is what brings a thousand-request restore inside its budget. Each entry
 /// keeps its own error so one bad file reports against its own name.
-fn read_many(root: &Path, names: &[String]) -> Vec<Result<Vec<u8>>> {
-    let read = |name: &String| -> Result<Vec<u8>> {
+fn read_many<T: Send>(
+    root: &Path,
+    names: &[String],
+    f: impl Fn(Vec<u8>) -> T + Sync,
+) -> Vec<Result<T>> {
+    let read = |name: &String| -> Result<T> {
         let path = resolve(root, name)?;
-        fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))
+        let bytes = fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))?;
+        Ok(f(bytes))
     };
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
@@ -285,12 +315,19 @@ impl Collection {
         };
         result.track("duckie.json")?;
         // Two passes: request files can be read at once, but the body and test files they
-        // reference are only known after parsing, so they form a second batch.
+        // reference are only known after parsing, so they form a second batch. That second
+        // batch is read here only to validate size and hash it for conflict detection — the
+        // decoded text is dropped rather than kept, so opening a large collection does not
+        // hold every body and test in memory before anything has actually been viewed.
+        // `ensure_loaded` reads a given request's body and test again, from disk, on demand.
         let names = result.manifest.requests.clone();
         let mut documents = Vec::with_capacity(names.len());
         let mut attachments = vec![];
-        for (relative, bytes) in names.iter().zip(read_many(&result.root, &names)) {
-            let bytes = bytes?;
+        for (relative, value) in names
+            .iter()
+            .zip(read_many(&result.root, &names, |bytes| bytes))
+        {
+            let bytes = value?;
             let value = document(&bytes, &result.path(relative)?)?;
             result.track_bytes(relative, &bytes);
             if let Some(file) = value["body"]["file"].as_str() {
@@ -302,45 +339,48 @@ impl Collection {
             }
             documents.push(value);
         }
-        let mut loaded = BTreeMap::new();
-        for (relative, bytes) in attachments
-            .iter()
-            .zip(read_many(&result.root, &attachments))
+        // Hashed and discarded within the same read, one file at a time per thread: a large
+        // batch of attachments is never resident all at once just to be thrown away afterward.
+        for (relative, hashed) in
+            attachments
+                .iter()
+                .zip(read_many(&result.root, &attachments, |bytes| {
+                    (bytes.len() as u64, hash(&bytes))
+                }))
         {
-            let bytes = bytes?;
+            let (len, digest) = hashed?;
             let limit = if relative.starts_with("bodies/") {
                 20 * MIB
             } else {
                 MIB
             };
-            if bytes.len() as u64 > limit {
+            if len > limit {
                 bail!(
                     "{relative} exceeds {} MiB; use File body mode or shorten the test",
                     limit / MIB
                 );
             }
-            result.track_bytes(relative, &bytes);
-            loaded.insert(
-                relative.clone(),
-                String::from_utf8_lossy(&bytes).into_owned(),
-            );
+            result.hashes.insert(relative.clone(), Some(digest));
         }
         let mut ids = std::collections::HashSet::new();
         for mut value in documents {
-            if let Some(file) = value["body"]["file"].as_str().map(str::to_owned) {
-                let text = loaded.get(&file).cloned().unwrap_or_default();
-                value["body"]["text"] = text.into();
+            let body_file = value["body"]["file"].as_str().map(str::to_owned);
+            if body_file.is_some() {
+                // A placeholder the deserializer accepts; `ensure_loaded` fills in the real text.
+                value["body"]["text"] = String::new().into();
                 value["body"].as_object_mut().unwrap().remove("file");
             }
             let definition: RequestDefinition = serde_json::from_value(value)?;
             if !ids.insert(definition.id.clone()) {
                 bail!("Duplicate request ID {}", definition.id);
             }
-            let source = loaded
-                .get(&definition.tests.file)
-                .cloned()
-                .unwrap_or_default();
-            result.requests.push(StoredRequest { definition, source });
+            let loaded = body_file.is_none() && definition.tests.file.is_empty();
+            result.requests.push(StoredRequest {
+                definition,
+                source: String::new(),
+                loaded,
+                body_file,
+            });
         }
         let env_dir = result.path("environments")?;
         if env_dir.exists() {
@@ -390,6 +430,41 @@ impl Collection {
     }
     pub fn changed_on_disk(&self) -> Result<Vec<String>> {
         self.watcher().changed()
+    }
+    /// Reads the real body text and test source for one request, if `open` deferred them. A
+    /// plain read, not `read_tracked`: the hash captured at `open` is what conflict detection
+    /// still compares against, so this never masks an external edit — it only fills in the
+    /// content to show or send. Harmless to call on an already-loaded request.
+    pub fn ensure_loaded(&mut self, id: &str) -> Result<()> {
+        let Some(index) = self.requests.iter().position(|r| r.definition.id == id) else {
+            return Ok(());
+        };
+        if self.requests[index].loaded {
+            return Ok(());
+        }
+        let tests_file = self.requests[index].definition.tests.file.clone();
+        let body_file = self.requests[index].body_file.clone();
+        let read = |relative: &str| -> Result<String> {
+            let bytes = fs::read(self.path(relative)?)
+                .with_context(|| format!("Cannot read {relative}"))?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        };
+        let source = if tests_file.is_empty() {
+            String::new()
+        } else {
+            read(&tests_file)?
+        };
+        let body_text = body_file.as_deref().map(read).transpose()?;
+        let req = &mut self.requests[index];
+        req.source = source;
+        if let Some(text) = body_text {
+            match &mut req.definition.body {
+                Body::Json { text: t } | Body::Text { text: t } => *t = text,
+                _ => {}
+            }
+        }
+        req.loaded = true;
+        Ok(())
     }
     /// A handle that re-checks the tracked files without copying the collection's contents.
     /// Cloning a whole collection to answer "did anything change" would copy every body and test.
@@ -535,16 +610,21 @@ mod tests {
             secret: "token".into(),
         });
         r.extra.insert("x-team".into(), "test".into());
-        c.requests.push(StoredRequest {
-            definition: r,
-            source: "test('ok',()=>{});".into(),
-        });
+        c.requests
+            .push(StoredRequest::new(r, "test('ok',()=>{});".into()));
         c.secrets.environments.insert(
             "dev".into(),
             Values::from([("token".into(), "private-value".into())]),
         );
         c.save().unwrap();
-        let loaded = Collection::open(dir.path()).unwrap();
+        let mut loaded = Collection::open(dir.path()).unwrap();
+        assert!(
+            !loaded.requests[0].loaded,
+            "content is deferred until asked for"
+        );
+        let id = loaded.requests[0].definition.id.clone();
+        loaded.ensure_loaded(&id).unwrap();
+        assert!(loaded.requests[0].loaded);
         assert_eq!(loaded.requests[0].source, "test('ok',()=>{});");
         assert!(loaded.requests[0].definition.extra.contains_key("x-team"));
         let request = fs::read_to_string(dir.path().join(&loaded.manifest.requests[0])).unwrap();
@@ -604,10 +684,7 @@ mod tests {
         req.query.push(Row::new("q", "1"));
         req.query[0].extra.insert("rowExt".into(), nested.clone());
         req.extra.insert("requestExt".into(), nested.clone());
-        c.requests.push(StoredRequest {
-            definition: req,
-            source: String::new(),
-        });
+        c.requests.push(StoredRequest::new(req, String::new()));
         c.environments[0]
             .extra
             .insert("envExt".into(), nested.clone());
@@ -628,14 +705,14 @@ mod tests {
     fn the_watcher_classifies_what_changed_under_the_collection() {
         let dir = tempfile::tempdir().unwrap();
         let mut collection = Collection::new(dir.path().to_path_buf(), "watched".into()).unwrap();
-        collection.requests.push(StoredRequest {
-            definition: RequestDefinition {
+        collection.requests.push(StoredRequest::new(
+            RequestDefinition {
                 id: "one".into(),
                 body: Body::Json { text: "{}".into() },
                 ..Default::default()
             },
-            source: "test('a', () => {});".into(),
-        });
+            "test('a', () => {});".into(),
+        ));
         collection.save().unwrap();
         let watcher = collection.watcher();
         assert!(watcher.compare().unwrap().is_empty(), "nothing changed yet");
@@ -712,5 +789,100 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the second transaction should acquire the lock once released");
         handle.join().unwrap();
+    }
+    #[test]
+    fn lazy_body_and_test_content_loads_on_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Collection::new(dir.path().into(), "Example".into()).unwrap();
+        c.requests.push(StoredRequest::new(
+            RequestDefinition {
+                id: "with-extras".into(),
+                body: Body::Json {
+                    text: "{\"n\":1}".into(),
+                },
+                ..Default::default()
+            },
+            "test('x', () => {});".into(),
+        ));
+        c.save().unwrap();
+
+        let mut opened = Collection::open(dir.path()).unwrap();
+        let with_extras = |c: &Collection| {
+            c.requests
+                .iter()
+                .find(|r| r.definition.id == "with-extras")
+                .unwrap()
+                .clone()
+        };
+        let deferred = with_extras(&opened);
+        assert!(!deferred.loaded, "content is deferred until asked for");
+        assert!(deferred.source.is_empty());
+        match &deferred.definition.body {
+            Body::Json { text } => assert!(text.is_empty(), "body text deferred too"),
+            other => panic!("expected Json, {}", serde_json::to_string(other).unwrap()),
+        }
+
+        // The hash needed to catch an external edit was still captured at open, unaffected by
+        // deferring the content itself.
+        fs::write(dir.path().join("bodies/with-extras.json"), "{}").unwrap();
+        assert_eq!(
+            opened.changed_on_disk().unwrap(),
+            ["bodies/with-extras.json"]
+        );
+        // `save` writes the body's raw text as-is, with no reformatting, so this restores the
+        // exact original bytes rather than an equivalent-but-differently-printed document.
+        fs::write(dir.path().join("bodies/with-extras.json"), "{\"n\":1}").unwrap();
+        assert!(opened.changed_on_disk().unwrap().is_empty());
+
+        opened.ensure_loaded("with-extras").unwrap();
+        let loaded = with_extras(&opened);
+        assert!(loaded.loaded);
+        assert_eq!(loaded.source, "test('x', () => {});");
+        match &loaded.definition.body {
+            Body::Json { text } => assert_eq!(text, "{\"n\":1}"),
+            other => panic!("expected Json, {}", serde_json::to_string(other).unwrap()),
+        }
+
+        // Idempotent, and an unknown id is a no-op rather than an error.
+        opened.ensure_loaded("with-extras").unwrap();
+        opened.ensure_loaded("does-not-exist").unwrap();
+    }
+    #[test]
+    fn a_request_with_no_body_file_and_no_tests_needs_nothing_deferred() {
+        // Duckie's own `save` always assigns a test file, so this shape — inline body text, no
+        // tests file at all — only arises from a hand-authored or externally produced request.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("requests")).unwrap();
+        fs::write(
+            dir.path().join("requests/bare.request.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "id": "bare",
+                "name": "Bare",
+                "folder": "",
+                "method": "GET",
+                "url": "",
+                "body": {"kind": "text", "text": "inline"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("duckie.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "name": "Example",
+                "requests": ["requests/bare.request.json"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let opened = Collection::open(dir.path()).unwrap();
+        let bare = &opened.requests[0];
+        assert!(bare.loaded, "no file-backed body or tests to defer");
+        match &bare.definition.body {
+            Body::Text { text } => assert_eq!(text, "inline"),
+            other => panic!("expected Text, {}", serde_json::to_string(other).unwrap()),
+        }
     }
 }

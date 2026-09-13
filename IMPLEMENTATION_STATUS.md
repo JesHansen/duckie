@@ -24,13 +24,15 @@ Multi-process transaction locking validated on 13 September 2026 in the working 
 
 OpenAPI import completeness (Tier C, all four items) validated on 13 September 2026 in the working tree: formatting, strict workspace Clippy, and all 87 non-measurement workspace tests passed (eight new tests in `duckie-openapi`); four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. The desktop binary was also launched directly (debug build, `DUCKIE_CAPTURE_PATH`) and rendered its first frame without error, as a smoke check on the changed import dialog; this did not exercise the File-menu "Update from spec…" entry interactively. Release binaries and the portable ZIP were not rebuilt or revalidated for this change.
 
+Lazy body/test loading (Tier D, area 5) validated on 13 September 2026 in the working tree: formatting, strict workspace Clippy, and all 91 non-measurement workspace tests passed (five new tests, three in `duckie-storage` and two in `duckie-desktop`); four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed, the second updated to load its two requests' content explicitly before sending, since that content is no longer loaded automatically. A manual before/after memory comparison is recorded in [PERFORMANCE.md](PERFORMANCE.md#deferred-bodytest-loading-13-september-2026); it is not part of the p95 benchmark protocol. Release binaries and the portable ZIP were not rebuilt or revalidated for this change.
+
 | Area | Recorded status | Remaining scope or qualification |
 | --- | --- | --- |
 | 1. Performance | Accepted for the agreed v1 scope | See PERFORMANCE.md. Cold launch has owner acceptance without a measured p95; CPU frame construction is only a lower bound on input-to-paint; reported GUI memory peaks exclude workers. |
 | 2. Windows validation | Accepted for the agreed v1 scope | Horizon and display-scale walkthroughs accepted; excluded enterprise/accessibility cases remain uncertified. |
 | 3. OpenAPI completeness | Accepted for the agreed v1 scope | Multipart/binary body handling, relative server URLs, external example fetching, and scoped reimport implemented; see below. |
 | 4. Editor polish | Accepted for the agreed v1 scope | Line numbers, syntax colours, bracket matching, grouped ordering, find navigation, and assertion-line navigation implemented. F6 traversal was dropped with accessibility. |
-| 5. Storage hardening | Open | Multi-process transaction locking implemented; see below. Lazy body/test loading remains open (Tier D). |
+| 5. Storage hardening | Accepted for the agreed v1 scope | Multi-process transaction locking and lazy body/test loading implemented; see below. |
 | 6. Transport polish | Accepted for the agreed v1 scope | Path-value encoding, charset-aware/binary preview choices, and safe content-encoding diagnostics implemented. |
 | 7. Packaging | Accepted for the agreed v1 scope | MIT license and dependency review recorded; portable package accepted on a clean machine. Keep development features out of later packages. |
 
@@ -62,9 +64,11 @@ OpenAPI import completeness (Tier C, all four items) validated on 13 September 2
 6. **Sanitized source provenance and reviewed reimport/update diffs that preserve local edits and tests.** See the resolution below. Scoped, by owner decision, to whole-operation replace: a reviewed diff decides which operations to touch, not which fields within one.
 7. **External example diagnostics.** Folded into item 6's resolution: `externalValue` content is now fetched, not just flagged as unfetched.
 
-### Tier D — smaller follow-up
+### Tier D — smaller follow-up: completed 13 September 2026
 
-8. **Lazy test/body loading (area 5).** Investigate for memory savings on large collections. Earlier profiling attributed only 28 ms of a 725 ms open to this work; do not claim it is the restore bottleneck without new measurements.
+8. **Lazy test/body loading (area 5): completed 13 September 2026.** See the resolution below. As the prior note anticipated, this is a memory result, not a restore-time one: the same files are still read and hashed at open either way.
+
+Tier D is now closed. Every numbered backlog item is resolved; what remains is the owner-decided scope in this document and the deliberately deferred/excluded items below.
 
 ### Deferred or excluded from v1
 
@@ -117,9 +121,18 @@ Regression coverage takes the lock directly from two threads to verify the secon
 
 **Sanitized source provenance and reviewed reimport/update diffs.** By owner decision, reimport is whole-operation replace, not a field-level merge: every generated request now carries its source (`sanitize_source` strips credentials, query, and fragment before it is recorded) alongside the existing `path`/`method`/`operationId` identity in `x-openapi`. **File > Update from spec…** re-reads a source, matches its operations against the open collection's requests by that identity, and presents a reviewable diff — Changed, New, and No-longer-in-the-spec — before touching anything. Applying a change always keeps the existing request's `id` and its `tests` (file and source) untouched; every other field is replaced wholesale from the fresh import, the same regeneration a first import already does, just scoped to one operation and shown before it happens. A request with no `x-openapi` provenance (hand-written, or imported from a different spec) is never proposed for removal. Nothing is written to disk until the collection is saved, same as every other change in Duckie.
 
+## Resolved: lazy body/test loading
+
+`Collection::open` used to read every body and test file's content into memory for every request, whether or not it was ever going to be viewed. It now only hashes and discards that content during open — the hash is still what conflict detection compares against — and reads the real text again from disk the first time a request is actually needed: `Collection::ensure_loaded(id)` fills in `StoredRequest::source` and any file-backed `body` text, matched by request id so it stays correct across reordering, additions and removals rather than assuming index alignment.
+
+`Draft` carries the same idea into the desktop app as a `pending` flag: `use_collection` sets it for a request `open` deferred, the per-frame check in `Duckie::ui` loads the selected draft the moment it is shown, and `send` loads it defensively as a second line of defence. The one place this needed real care is `save_collection`, which writes every draft back to a file regardless of whether the user ever opened it: it now hydrates every remaining pending draft before it builds the write set, and refuses to save at all if a hydration fails, rather than risk writing an unloaded placeholder over real content. `StoredRequest::new` gives every external caller (import, the reimport apply step, tests) a fully-loaded request, so nothing outside this crate can construct a deferred one by accident.
+
+The first attempt at measuring this showed almost no memory difference, which was a real finding about the *reading* code, not the deferral itself: the attachment pass batched every file's bytes into one `Vec` before any were discarded, so the transient peak barely differed from reading everything eagerly regardless of what got kept afterward. `read_many` now takes a per-file transform applied where each file is read, before its bytes cross back to the caller, so hashing 2,000 attachments during open no longer means holding all 2,000 at once. See [PERFORMANCE.md](PERFORMANCE.md#deferred-bodytest-loading-13-september-2026) for the measured comparison — restore time is unaffected, since the same files are still read and hashed at open either way; only memory changes.
+
 ## Implementation cautions
 
-- **Save covers the collection.** All dirty drafts save together. Reordering changes the manifest and must mark it dirty even if no request content changed. Deletion removes the manifest entry on Save but retains unreferenced files. Body/test files currently load eagerly on a background job.
+- **Save covers the collection.** All dirty drafts save together. Reordering changes the manifest and must mark it dirty even if no request content changed. Deletion removes the manifest entry on Save but retains unreferenced files. Body and test content loads lazily, per request, on first selection or Send; see below.
+- **A `pending` draft's body/source are placeholders, not empty content.** Any new code path that reads `Draft.request.body` or `Draft.source` — not just the ones that already do — must either go through a draft that is not `pending`, or call `Duckie::ensure_loaded` first. `save_collection`'s pre-save hydration loop is the backstop, but do not add a second way to reach `Collection::save` that skips it.
 - **The 24-hour spool threshold protects other instances.** Windows permits deletion of files opened with `FILE_SHARE_DELETE`; a file can still be in use by another Duckie instance. Do not shorten the threshold without a replacement ownership guard.
 - **Raw and Pretty searches have different offsets.** Raw find scans retained body bytes; Pretty is a reformatted copy, so its search remains page-local and labelled accordingly.
 - **Reference rebasing is essential.** An external document's internal `#/components/...` references must point into its embedded copy after inlining, rather than the root document's components. `as_url` also distinguishes Windows drive paths from URL schemes.
