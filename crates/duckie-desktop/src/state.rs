@@ -176,6 +176,7 @@ pub enum Pending {
     Open,
     NewCollection,
     Import,
+    UpdateFromSpec,
     Close,
     Reload,
 }
@@ -192,6 +193,13 @@ pub struct ImportUi {
     pub filter: String,
     pub selected: usize,
     pub cancel: Option<CancellationToken>,
+    /// Reviewing changes against the open collection instead of importing into a new one.
+    pub update: bool,
+    pub plan: Option<duckie_openapi::ReimportPlan>,
+    /// Parallel to `plan.matches`/`additions`/`removals`: which of each the review applies.
+    pub apply_updates: Vec<bool>,
+    pub apply_additions: Vec<bool>,
+    pub apply_removals: Vec<bool>,
 }
 pub struct Duckie {
     #[cfg(feature = "bench")]
@@ -714,6 +722,21 @@ impl Duckie {
                         match result {
                             Ok(draft) => {
                                 import.server = draft.servers.first().cloned().unwrap_or_default();
+                                if import.update {
+                                    let base = if import.url_mode {
+                                        import.source.clone()
+                                    } else {
+                                        import.source.replace('\\', "/")
+                                    };
+                                    let existing: Vec<RequestDefinition> =
+                                        self.drafts.iter().map(|d| d.request.clone()).collect();
+                                    let plan =
+                                        duckie_openapi::plan_reimport(&existing, &draft, &base);
+                                    import.apply_updates = vec![true; plan.matches.len()];
+                                    import.apply_additions = vec![true; plan.additions.len()];
+                                    import.apply_removals = vec![false; plan.removals.len()];
+                                    import.plan = Some(plan);
+                                }
                                 import.draft = Some(draft);
                                 import.error.clear();
                             }
@@ -947,6 +970,12 @@ impl Duckie {
                 }
             }
             Pending::Import => self.import = Some(ImportUi::default()),
+            Pending::UpdateFromSpec => {
+                self.import = Some(ImportUi {
+                    update: true,
+                    ..Default::default()
+                })
+            }
             Pending::Close => {
                 self.allow_close = true;
                 self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);

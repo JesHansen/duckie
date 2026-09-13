@@ -22,11 +22,13 @@ Charset/binary preview and content-encoding diagnostics validated on 13 Septembe
 
 Multi-process transaction locking validated on 13 September 2026 in the working tree: formatting, strict workspace Clippy, and all 79 non-measurement workspace tests passed (one new test added); four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. Release binaries and the portable ZIP were not rebuilt or revalidated for this change.
 
+OpenAPI import completeness (Tier C, all four items) validated on 13 September 2026 in the working tree: formatting, strict workspace Clippy, and all 87 non-measurement workspace tests passed (eight new tests in `duckie-openapi`); four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. The desktop binary was also launched directly (debug build, `DUCKIE_CAPTURE_PATH`) and rendered its first frame without error, as a smoke check on the changed import dialog; this did not exercise the File-menu "Update from spec…" entry interactively. Release binaries and the portable ZIP were not rebuilt or revalidated for this change.
+
 | Area | Recorded status | Remaining scope or qualification |
 | --- | --- | --- |
 | 1. Performance | Accepted for the agreed v1 scope | See PERFORMANCE.md. Cold launch has owner acceptance without a measured p95; CPU frame construction is only a lower bound on input-to-paint; reported GUI memory peaks exclude workers. |
 | 2. Windows validation | Accepted for the agreed v1 scope | Horizon and display-scale walkthroughs accepted; excluded enterprise/accessibility cases remain uncertified. |
-| 3. OpenAPI completeness | Open | Media handling, relative servers, source provenance, and reviewed reimport. |
+| 3. OpenAPI completeness | Accepted for the agreed v1 scope | Multipart/binary body handling, relative server URLs, external example fetching, and scoped reimport implemented; see below. |
 | 4. Editor polish | Accepted for the agreed v1 scope | Line numbers, syntax colours, bracket matching, grouped ordering, find navigation, and assertion-line navigation implemented. F6 traversal was dropped with accessibility. |
 | 5. Storage hardening | Open | Multi-process transaction locking implemented; see below. Lazy body/test loading remains open (Tier D). |
 | 6. Transport polish | Accepted for the agreed v1 scope | Path-value encoding, charset-aware/binary preview choices, and safe content-encoding diagnostics implemented. |
@@ -52,12 +54,12 @@ Multi-process transaction locking validated on 13 September 2026 in the working 
 2. **Charset and binary preview options (area 6): completed 13 September 2026.** See the resolution below.
 3. **Multi-process transaction locking (area 5): completed 13 September 2026.** See the resolution below. Tier B is now closed; lazy body/test loading remains open as Tier D item 8.
 
-### Tier C — import completeness (area 3)
+### Tier C — import completeness (area 3): completed 13 September 2026
 
-4. Multipart and richer request media handling.
-5. Relative server URLs resolved against source identity, including multi-file specs.
-6. Sanitized source provenance and reviewed reimport/update diffs that preserve local edits and tests.
-7. External example diagnostics.
+4. **Multipart and richer request media handling.** See the resolution below.
+5. **Relative server URLs resolved against source identity, including multi-file specs.** See the resolution below.
+6. **Sanitized source provenance and reviewed reimport/update diffs that preserve local edits and tests.** See the resolution below. Scoped, by owner decision, to whole-operation replace: a reviewed diff decides which operations to touch, not which fields within one.
+7. **External example diagnostics.** Folded into item 6's resolution: `externalValue` content is now fetched, not just flagged as unfetched.
 
 ### Tier D — smaller follow-up
 
@@ -103,6 +105,16 @@ Save-time content-hash checks already caught changes made by another instance *b
 `Collection::save` and the recovery step in `Collection::open` now hold an OS-level exclusive lock on `.duckie/lock` for the duration of that transaction. The lock is per-open-handle (`std::fs::File::lock`, stable since Rust 1.89), not a marker file the code has to clean up itself: Windows and the kernel release it the instant the holding process exits or crashes, the same guarantee the 24-hour spool sweep already relies on for `FILE_SHARE_DELETE`. A second instance's save blocks until the first finishes, then proceeds through its own content-hash check as before, so a genuine conflict (both instances editing the same collection) still surfaces as the existing "Changed on disk" error rather than silent corruption.
 
 Regression coverage takes the lock directly from two threads to verify the second blocks until the first releases it, standing in for two instances racing to save.
+
+## Resolved: OpenAPI import completeness
+
+**Multipart and richer request media handling.** A `multipart/form-data` (or `multipart/mixed`) request body is now generated from its schema rather than blocked: a `format: binary` property (or an array of them) becomes a file part flagged "Needs input", exactly like a missing path or query value; every other property becomes a generated text part. A whole-body `{type: string, format: binary}` schema, or `application/octet-stream`, becomes a `Body::File` awaiting a manual file selection instead of a hard blocker — Send is still available and fails with the existing "Select an existing body file" message until one is chosen, the same soft-diagnostic pattern already used for an unfilled path variable. Other media types this build cannot generate (arbitrary XML, custom binary formats) remain a manual-configuration blocker; generating XML from a JSON Schema was judged out of scope rather than attempted partially.
+
+**Relative server URLs resolved against source identity, including multi-file specs.** `servers` entries were previously used as literal strings. They are now resolved against the identity of the document that declared them: the root document's `base` for the top-level `servers` array, and — since OpenAPI 3.1 lets a path item be a `$ref` into another file — that file's own URI for a path item's or operation's `servers` override, tracked via `document_keys` (the same `dN` numbering `inline_external` embeds documents under) and `origin_document`. A relative override in a multi-file spec now produces a request Duckie can send rather than an unresolved template fragment.
+
+**External example diagnostics, extended to actually fetch them.** `externalValue` content (an example's literal value kept in a separate file or URL, distinct from `$ref`) is now collected (`external_examples`) and fetched the same deliberately bounded, same-origin way as referenced documents, then inlined (`inline_examples`) before import runs. JSON content is parsed; anything else is kept as raw text, which is what a non-JSON example becomes as a body value. An example that could not be retrieved is still reported by name rather than silently dropped.
+
+**Sanitized source provenance and reviewed reimport/update diffs.** By owner decision, reimport is whole-operation replace, not a field-level merge: every generated request now carries its source (`sanitize_source` strips credentials, query, and fragment before it is recorded) alongside the existing `path`/`method`/`operationId` identity in `x-openapi`. **File > Update from spec…** re-reads a source, matches its operations against the open collection's requests by that identity, and presents a reviewable diff — Changed, New, and No-longer-in-the-spec — before touching anything. Applying a change always keeps the existing request's `id` and its `tests` (file and source) untouched; every other field is replaced wholesale from the fresh import, the same regeneration a first import already does, just scoped to one operation and shown before it happens. A request with no `x-openapi` provenance (hand-written, or imported from a different spec) is never proposed for removal. Nothing is written to disk until the collection is saved, same as every other change in Duckie.
 
 ## Implementation cautions
 

@@ -1,21 +1,31 @@
 use crate::{state::*, ui::variables};
 use anyhow::Context;
 use duckie_model::*;
-use duckie_openapi::{MAX_EXTERNAL_BYTES, MAX_EXTERNAL_DOCUMENTS, external_references};
+use duckie_openapi::{
+    MAX_EXTERNAL_BYTES, MAX_EXTERNAL_DOCUMENTS, external_examples, external_references,
+};
 use duckie_storage::{Collection, SecretsFile, StoredRequest};
 use eframe::egui;
 use std::collections::BTreeMap;
 
-/// Follows `$ref`s to sibling files, and onward from those, until nothing new is referenced.
-/// Bounded by document count and total bytes so a spec cannot pull in an unbounded tree.
-fn acquire_local(
-    base: &str,
-    root: &serde_json::Value,
-) -> (BTreeMap<String, serde_json::Value>, Vec<String>) {
+/// Fetched `$ref` documents (parsed) and `externalValue` example content (raw bytes), keyed by
+/// resolved URI.
+type Acquired = (
+    BTreeMap<String, serde_json::Value>,
+    BTreeMap<String, Vec<u8>>,
+);
+
+/// Follows `$ref`s and `externalValue` examples to sibling files, and onward from those, until
+/// nothing new is referenced. Bounded by document count and total bytes so a spec cannot pull in
+/// an unbounded tree. `$ref` targets must parse as the OpenAPI document structure; example
+/// content is arbitrary and kept as raw bytes.
+fn acquire_local(base: &str, root: &serde_json::Value) -> (Acquired, Vec<String>) {
     let mut fetched = BTreeMap::new();
+    let mut examples = BTreeMap::new();
     let mut notes = vec![];
     let mut budget = MAX_EXTERNAL_BYTES;
     let mut pending = external_references(root, base);
+    let mut pending_examples = external_examples(root, base);
     while let Some(uri) = pending.pop() {
         if fetched.contains_key(&uri) {
             continue;
@@ -32,6 +42,7 @@ fn acquire_local(
                     budget -= bytes.len();
                     // A fetched document's own references are relative to it, not to the root.
                     pending.extend(external_references(&document, &uri));
+                    pending_examples.extend(external_examples(&document, &uri));
                     fetched.insert(uri, document);
                 }
                 Err(e) => notes.push(format!("{uri}: {e}")),
@@ -40,61 +51,92 @@ fn acquire_local(
             Err(e) => notes.push(format!("{uri}: {e}")),
         }
     }
-    (fetched, notes)
+    for uri in pending_examples {
+        if examples.contains_key(&uri) || fetched.len() + examples.len() >= MAX_EXTERNAL_DOCUMENTS {
+            continue;
+        }
+        match std::fs::read(&uri) {
+            Ok(bytes) if bytes.len() <= budget => {
+                budget -= bytes.len();
+                examples.insert(uri, bytes);
+            }
+            Ok(_) => notes.push(format!("{uri}: referenced example exceeds the size limit")),
+            Err(e) => notes.push(format!("{uri}: {e}")),
+        }
+    }
+    ((fetched, examples), notes)
 }
 /// The same, over HTTP. Credentials given for the spec are reused, so acquisition is restricted to
-/// the spec's own origin: sending the token to another host because a document asked would be a
-/// credential leak the user never agreed to.
+/// the spec's own origin: sending the token to another host because a document or example asked
+/// would be a credential leak the user never agreed to.
+async fn fetch_remote(
+    http: &duckie_http::HttpEngine,
+    origin: Option<&url::Origin>,
+    uri: &str,
+    budget: u64,
+    env: &EnvironmentSnapshot,
+    template: &RequestDefinition,
+) -> Option<Vec<u8>> {
+    let target = url::Url::parse(uri).ok()?;
+    if Some(&target.origin()) != origin {
+        return None;
+    }
+    let request = RequestDefinition {
+        url: uri.to_owned(),
+        auth: template.auth.clone(),
+        encoded_limit: budget.max(1),
+        decoded_limit: budget.max(1),
+        ..Default::default()
+    };
+    let prepared = prepare(&request, env, &RunBindings::default(), 0).ok()?;
+    let token = tokio_util::sync::CancellationToken::new();
+    let response = http.execute(prepared, token).await.ok()?;
+    if response.outcome != Outcome::Complete
+        || !response.status.is_some_and(|s| (200..300).contains(&s))
+    {
+        return None;
+    }
+    response.body.read(0, budget).ok()
+}
 async fn acquire_remote(
     http: &duckie_http::HttpEngine,
     base: &str,
     root: &serde_json::Value,
     env: &EnvironmentSnapshot,
     template: &RequestDefinition,
-) -> BTreeMap<String, serde_json::Value> {
+) -> Acquired {
     let origin = url::Url::parse(base).ok().map(|u| u.origin());
     let mut fetched = BTreeMap::new();
+    let mut examples = BTreeMap::new();
     let mut budget = MAX_EXTERNAL_BYTES as u64;
     let mut pending = external_references(root, base);
+    let mut pending_examples = external_examples(root, base);
     while let Some(uri) = pending.pop() {
         if fetched.contains_key(&uri) || fetched.len() >= MAX_EXTERNAL_DOCUMENTS {
             continue;
         }
-        let Ok(target) = url::Url::parse(&uri) else {
-            continue;
-        };
-        if Some(target.origin()) != origin {
-            continue;
-        }
-        let request = RequestDefinition {
-            url: uri.clone(),
-            auth: template.auth.clone(),
-            encoded_limit: budget.max(1),
-            decoded_limit: budget.max(1),
-            ..Default::default()
-        };
-        let Ok(prepared) = prepare(&request, env, &RunBindings::default(), 0) else {
-            continue;
-        };
-        let token = tokio_util::sync::CancellationToken::new();
-        let Ok(response) = http.execute(prepared, token).await else {
-            continue;
-        };
-        if response.outcome != Outcome::Complete
-            || !response.status.is_some_and(|s| (200..300).contains(&s))
-        {
-            continue;
-        }
-        let Ok(bytes) = response.body.read(0, budget) else {
+        let Some(bytes) = fetch_remote(http, origin.as_ref(), &uri, budget, env, template).await
+        else {
             continue;
         };
         if let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             budget = budget.saturating_sub(bytes.len() as u64);
             pending.extend(external_references(&document, &uri));
+            pending_examples.extend(external_examples(&document, &uri));
             fetched.insert(uri, document);
         }
     }
-    fetched
+    for uri in pending_examples {
+        if examples.contains_key(&uri) || fetched.len() + examples.len() >= MAX_EXTERNAL_DOCUMENTS {
+            continue;
+        }
+        if let Some(bytes) = fetch_remote(http, origin.as_ref(), &uri, budget, env, template).await
+        {
+            budget = budget.saturating_sub(bytes.len() as u64);
+            examples.insert(uri, bytes);
+        }
+    }
+    (fetched, examples)
 }
 
 impl Duckie {
@@ -319,8 +361,14 @@ impl Duckie {
         let mut open = true;
         let mut read = false;
         let mut commit = false;
+        let mut apply = false;
         let mut back = false;
-        egui::Window::new("Import OpenAPI").open(&mut open).default_size([880.0,570.0]).show(ctx,|ui|{
+        let title = if import.update {
+            "Update from spec"
+        } else {
+            "Import OpenAPI"
+        };
+        egui::Window::new(title).open(&mut open).default_size([880.0,570.0]).show(ctx,|ui|{
             match import.draft.as_mut() { None => {
                 ui.horizontal(|ui|{ui.selectable_value(&mut import.url_mode,false,"Local file");ui.selectable_value(&mut import.url_mode,true,"URL");});ui.separator();
                 ui.label("OpenAPI 3.0 / 3.1 / 3.2 JSON");
@@ -331,6 +379,50 @@ impl Duckie {
                 });}
                 ui.add_space(16.0);ui.weak("Read creates a review draft. Generated API requests are never sent during import.");
                 read=ui.add_enabled(!self.io_busy && !import.source.trim().is_empty(),egui::Button::new("Read and review")).clicked();
+            }, Some(draft) if import.update => {
+                ui.label(format!("Comparing against the open collection · OpenAPI {}", draft.version));
+                if let Some(plan) = &import.plan {
+                    let unchanged = plan.matches.iter().filter(|m| !m.changed).count();
+                    ui.separator();
+                    egui::ScrollArea::vertical().id_salt("plan-review").max_height(400.0).show(ui, |ui| {
+                        if plan.matches.iter().any(|m| m.changed) {
+                            ui.strong("Changed");
+                            for (row, m) in plan.matches.iter().enumerate() {
+                                if !m.changed { continue; }
+                                let existing = &self.drafts[m.existing_index].request;
+                                let fresh = &draft.operations[m.operation_index].request;
+                                ui.checkbox(&mut import.apply_updates[row], format!("{}  {}", fresh.method, existing.name));
+                            }
+                        }
+                        if !plan.additions.is_empty() {
+                            ui.add_space(8.0);
+                            ui.strong("New");
+                            for (row, &j) in plan.additions.iter().enumerate() {
+                                let op = &draft.operations[j];
+                                ui.checkbox(&mut import.apply_additions[row], format!("{}  {}", op.request.method, op.request.name));
+                            }
+                        }
+                        if !plan.removals.is_empty() {
+                            ui.add_space(8.0);
+                            ui.strong("No longer in the spec");
+                            ui.weak("Unchecked requests stay in the collection.");
+                            for (row, &i) in plan.removals.iter().enumerate() {
+                                let existing = &self.drafts[i].request;
+                                ui.checkbox(&mut import.apply_removals[row], format!("{}  {}", existing.method, existing.name));
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.weak(format!("{unchanged} operation(s) unchanged, not shown"));
+                    for diagnostic in &draft.diagnostics { ui.label(diagnostic); }
+                    let selected = import.apply_updates.iter().filter(|b| **b).count()
+                        + import.apply_additions.iter().filter(|b| **b).count()
+                        + import.apply_removals.iter().filter(|b| **b).count();
+                    ui.horizontal(|ui| {
+                        back = ui.button("Back").clicked();
+                        apply = ui.add_enabled(selected > 0 && !self.io_busy, egui::Button::new(format!("Apply {selected} change(s) to this collection"))).clicked();
+                    });
+                }
             }, Some(draft) => {
                 ui.horizontal(|ui|{ui.label("Collection");ui.text_edit_singleline(&mut draft.name);ui.weak(format!("OpenAPI {}",draft.version));});
                 ui.horizontal(|ui|{ui.label("Server / baseUrl");ui.add(egui::TextEdit::singleline(&mut import.server).desired_width(540.0));egui::ComboBox::from_id_salt("import-server").selected_text("Servers").show_ui(ui,|ui|{for server in &draft.servers{ui.selectable_value(&mut import.server,server.clone(),server);}});});
@@ -360,6 +452,7 @@ impl Duckie {
         });
         if back {
             import.draft = None;
+            import.plan = None;
             import.error.clear();
         }
         if read {
@@ -413,13 +506,23 @@ impl Duckie {
                         let bytes = response.body.read(0, 20 * MIB)?;
                         let mut root: serde_json::Value = serde_json::from_slice(&bytes)
                             .context("OpenAPI source must be valid JSON")?;
-                        let fetched = acquire_remote(&http, &base, &root, &env, &request).await;
-                        let notes = duckie_openapi::inline_external(&mut root, &base, &fetched);
+                        let (fetched, fetched_examples) =
+                            acquire_remote(&http, &base, &root, &env, &request).await;
+                        let doc_bases = duckie_openapi::document_keys(&fetched);
+                        let mut notes = duckie_openapi::inline_external(&mut root, &base, &fetched);
+                        notes.extend(duckie_openapi::inline_examples(
+                            &mut root,
+                            &base,
+                            &doc_bases,
+                            &fetched_examples,
+                        ));
                         tokio::task::spawn_blocking(move || {
-                            duckie_openapi::import_value(root).map(|mut draft| {
-                                draft.diagnostics.extend(notes);
-                                draft
-                            })
+                            duckie_openapi::import_value_based(root, &base, &doc_bases).map(
+                                |mut draft| {
+                                    draft.diagnostics.extend(notes);
+                                    draft
+                                },
+                            )
                         })
                         .await?
                     }
@@ -438,12 +541,21 @@ impl Duckie {
                         let mut root: serde_json::Value =
                             serde_json::from_slice(&std::fs::read(&path)?)
                                 .context("OpenAPI source must be valid JSON")?;
-                        let (fetched, mut notes) = acquire_local(&base, &root);
+                        let ((fetched, fetched_examples), mut notes) = acquire_local(&base, &root);
+                        let doc_bases = duckie_openapi::document_keys(&fetched);
                         notes.extend(duckie_openapi::inline_external(&mut root, &base, &fetched));
-                        duckie_openapi::import_value(root).map(|mut draft| {
-                            draft.diagnostics.extend(notes);
-                            draft
-                        })
+                        notes.extend(duckie_openapi::inline_examples(
+                            &mut root,
+                            &base,
+                            &doc_bases,
+                            &fetched_examples,
+                        ));
+                        duckie_openapi::import_value_based(root, &base, &doc_bases).map(
+                            |mut draft| {
+                                draft.diagnostics.extend(notes);
+                                draft
+                            },
+                        )
                     })())
                 });
             }
@@ -474,6 +586,66 @@ impl Duckie {
                 }
                 Err(e) => import.error = e.to_string(),
             }
+        }
+        if apply && let (Some(draft), Some(plan)) = (import.draft.take(), import.plan.take()) {
+            // Whole-operation replace: every field but id and tests comes from the fresh spec,
+            // exactly as a first import would produce it. Removal is by id, decided up front,
+            // because applying updates first would shift the indices the plan was computed against.
+            let remove_ids: Vec<String> = plan
+                .removals
+                .iter()
+                .zip(&import.apply_removals)
+                .filter(|(_, apply)| **apply)
+                .map(|(&i, _)| self.drafts[i].request.id.clone())
+                .collect();
+            for (row, m) in plan.matches.iter().enumerate() {
+                if import.apply_updates[row] {
+                    let mut fresh = draft.operations[m.operation_index].finish();
+                    let existing = &self.drafts[m.existing_index].request;
+                    fresh.id = existing.id.clone();
+                    fresh.tests = existing.tests.clone();
+                    self.drafts[m.existing_index].request = fresh;
+                    self.drafts[m.existing_index].dirty = true;
+                }
+            }
+            for (row, &j) in plan.additions.iter().enumerate() {
+                if import.apply_additions[row] {
+                    self.drafts.push(Draft {
+                        request: draft.operations[j].finish(),
+                        source: String::new(),
+                        revision: 0,
+                        dirty: true,
+                        error: String::new(),
+                    });
+                }
+            }
+            let removed = remove_ids.len();
+            for id in remove_ids {
+                if let Some(pos) = self.drafts.iter().position(|d| d.request.id == id) {
+                    self.drafts.remove(pos);
+                    self.responses.remove(&id);
+                }
+            }
+            if self.drafts.is_empty() {
+                self.drafts.push(Draft::default());
+            }
+            self.selected = self.selected.min(self.drafts.len() - 1);
+            // Manifest membership changed even where no single request's content did.
+            self.env_dirty = true;
+            self.status = format!(
+                "Applied {} update(s), {} addition(s) and {removed} removal(s). Save to write them to disk.",
+                plan.matches
+                    .iter()
+                    .enumerate()
+                    .filter(|(row, _)| import.apply_updates[*row])
+                    .count(),
+                plan.additions
+                    .iter()
+                    .enumerate()
+                    .filter(|(row, _)| import.apply_additions[*row])
+                    .count(),
+            );
+            open = false;
         }
         if open {
             self.import = Some(import);

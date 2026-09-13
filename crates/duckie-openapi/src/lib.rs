@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, bail};
 use duckie_model::*;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct ImportDraft {
     pub name: String,
@@ -141,6 +141,137 @@ pub fn inline_external(
     diagnostics.dedup();
     diagnostics
 }
+/// The `dN` key `inline_external` gives each fetched document, keyed the other way round. Callers
+/// that need to know which source document a merged path item or example came from — to resolve
+/// a relative server URL or `externalValue`, for instance — use this instead of recomputing the
+/// same enumeration and risking it drifting out of sync with `inline_external`'s own numbering.
+pub fn document_keys(fetched: &BTreeMap<String, Value>) -> BTreeMap<String, String> {
+    fetched
+        .keys()
+        .enumerate()
+        .map(|(i, uri)| (format!("d{i}"), uri.clone()))
+        .collect()
+}
+/// The `dN` document key a rebased `$ref` (or the raw reference before rebasing) points into, if
+/// any. Used to find which source document a `paths` entry came from, since OpenAPI 3.1 lets a
+/// path item itself be a `$ref` into another file.
+fn origin_document(reference: &str) -> Option<&str> {
+    reference
+        .strip_prefix(&format!("#/{EXTERNAL}/"))
+        .and_then(|rest| rest.split('/').next())
+}
+/// Resolves a `servers` entry against the document that declared it. Absolute URLs are returned
+/// unchanged; a relative one (`/v2`, `v2`, `//other.test/v2`) is joined against `base` the same
+/// way a browser resolves a relative link, so a multi-file spec's per-document server overrides
+/// still produce a request Duckie can send rather than a template fragment.
+fn resolve_server_url(url: &str, base: &str) -> String {
+    if as_url(url).is_some() {
+        return url.to_owned();
+    }
+    match as_url(base).and_then(|b| b.join(url).ok()) {
+        Some(joined) => joined.into(),
+        None => url.to_owned(),
+    }
+}
+/// Strips credentials and query/fragment from a source identity before it is recorded on an
+/// imported request. A source URL can carry an API key or token in its query string; provenance
+/// is used later to match requests for reimport, not to replay the request, so none of that
+/// needs to be retained. Local file paths carry no such risk and are kept as-is.
+pub fn sanitize_source(source: &str) -> String {
+    let Some(mut url) = as_url(source) else {
+        return source.to_owned();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+/// Every `externalValue` URI reachable from `root`, resolved against `base`. Mirrors
+/// `external_references`: an example can point at literal content in another file or over HTTP,
+/// separate from `$ref`, and that content has to be fetched the same deliberate way.
+pub fn external_examples(root: &Value, base: &str) -> Vec<String> {
+    let mut found = BTreeSet::new();
+    collect_external_values(root, base, &mut found);
+    found.into_iter().collect()
+}
+fn collect_external_values(value: &Value, base: &str, found: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(uri)) = map.get("externalValue") {
+                found.insert(join_ref(base, uri));
+            }
+            for child in map.values() {
+                collect_external_values(child, base, found);
+            }
+        }
+        Value::Array(list) => list
+            .iter()
+            .for_each(|child| collect_external_values(child, base, found)),
+        _ => {}
+    }
+}
+/// Embeds fetched `externalValue` content as an inline `value`, so it is picked up exactly like
+/// an authored inline example. Content is parsed as JSON when possible; otherwise it is kept as
+/// the raw text, which is what a non-JSON example (CSV, plain text) needs to become a body value.
+/// Must run after `inline_external`, since an example can live inside an embedded document and
+/// its `externalValue` is relative to that document, not the root.
+pub fn inline_examples(
+    root: &mut Value,
+    base: &str,
+    doc_bases: &BTreeMap<String, String>,
+    fetched: &BTreeMap<String, Vec<u8>>,
+) -> Vec<String> {
+    let mut diagnostics = vec![];
+    if let Value::Object(map) = root {
+        for (key, child) in map.iter_mut() {
+            if key != EXTERNAL {
+                walk_examples(child, base, fetched, &mut diagnostics);
+            }
+        }
+        if let Some(Value::Object(docs)) = map.get_mut(EXTERNAL) {
+            for (key, doc) in docs.iter_mut() {
+                let doc_base = doc_bases.get(key).map(String::as_str).unwrap_or(base);
+                walk_examples(doc, doc_base, fetched, &mut diagnostics);
+            }
+        }
+    }
+    diagnostics.sort();
+    diagnostics.dedup();
+    diagnostics
+}
+fn walk_examples(
+    value: &mut Value,
+    base: &str,
+    fetched: &BTreeMap<String, Vec<u8>>,
+    diagnostics: &mut Vec<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(uri)) = map.get("externalValue").cloned()
+                && map.get("value").is_none()
+            {
+                let resolved = join_ref(base, &uri);
+                match fetched.get(&resolved) {
+                    Some(bytes) => {
+                        let parsed = serde_json::from_slice::<Value>(bytes).unwrap_or_else(|_| {
+                            Value::String(String::from_utf8_lossy(bytes).into_owned())
+                        });
+                        map.insert("value".into(), parsed);
+                    }
+                    None => diagnostics.push(format!("External example not retrieved: {resolved}")),
+                }
+            }
+            for child in map.values_mut() {
+                walk_examples(child, base, fetched, diagnostics);
+            }
+        }
+        Value::Array(list) => list
+            .iter_mut()
+            .for_each(|child| walk_examples(child, base, fetched, diagnostics)),
+        _ => {}
+    }
+}
 fn resolve<'a>(root: &'a Value, value: &'a Value, chain: &mut Vec<String>) -> Result<&'a Value> {
     if chain.len() >= 32 {
         bail!("Reference depth exceeds 32");
@@ -268,6 +399,44 @@ fn variants(root: &Value, schema: &Value) -> Result<Vec<(String, Value)>> {
     }
     Ok(vec![(String::new(), sample(root, schema, 0)?)])
 }
+/// One multipart part per schema property: a `format: binary` property (or an array of them)
+/// becomes a file part awaiting a manual selection, everything else a generated text value.
+/// Returns the parts alongside a "Needs input" diagnostic for every file part, matching how a
+/// missing path or query value is reported.
+fn multipart_parts(root: &Value, schema: &Value) -> Result<(Vec<Part>, Vec<String>)> {
+    let schema = deref(root, schema)?;
+    let mut parts = vec![];
+    let mut diagnostics = vec![];
+    if let Some(properties) = schema["properties"].as_object() {
+        for (name, property) in properties {
+            let property = deref(root, property)?;
+            if property["readOnly"] == true {
+                continue;
+            }
+            let items = deref(root, &property["items"])?;
+            let is_file = property["format"] == "binary"
+                || (property["type"] == "array" && items["format"] == "binary");
+            if is_file {
+                diagnostics.push(format!("Needs input: file for part {name}"));
+                parts.push(Part {
+                    enabled: true,
+                    name: name.clone(),
+                    value: String::new(),
+                    file: true,
+                });
+            } else {
+                let value = sample(root, property, 1)?;
+                parts.push(Part {
+                    enabled: true,
+                    name: name.clone(),
+                    value: scalar(&value).unwrap_or_else(|| value.to_string()),
+                    file: false,
+                });
+            }
+        }
+    }
+    Ok((parts, diagnostics))
+}
 fn scalar(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
@@ -387,7 +556,7 @@ fn expand(
         _ => None,
     }
 }
-fn server_urls(servers: &Value) -> Vec<String> {
+fn server_urls(servers: &Value, base: &str) -> Vec<String> {
     servers
         .as_array()
         .into_iter()
@@ -402,7 +571,7 @@ fn server_urls(servers: &Value) -> Vec<String> {
                     );
                 }
             }
-            Some(url)
+            Some(resolve_server_url(&url, base))
         })
         .collect()
 }
@@ -412,7 +581,22 @@ pub fn import_json(bytes: &[u8]) -> Result<ImportDraft> {
     }
     import_value(serde_json::from_slice(bytes).context("OpenAPI source must be valid JSON")?)
 }
+/// Import without a known source identity: relative server URLs cannot be resolved and no
+/// provenance is recorded, so the result never participates in reimport matching. Kept for
+/// callers, including most tests, that have no source to give.
 pub fn import_value(root: Value) -> Result<ImportDraft> {
+    import_value_based(root, "", &BTreeMap::new())
+}
+/// The full import: `base` is the spec's own source identity (a URL or local path), used to
+/// resolve relative server URLs and to record sanitized provenance on each generated request so
+/// a later reimport can match it back up. `doc_bases` is `document_keys` for whatever was passed
+/// to `inline_external`, so a path item embedded from another file resolves its own `servers`
+/// against that file's identity rather than the root document's.
+pub fn import_value_based(
+    root: Value,
+    base: &str,
+    doc_bases: &BTreeMap<String, String>,
+) -> Result<ImportDraft> {
     let version = root["openapi"]
         .as_str()
         .context("Missing OpenAPI version (Swagger 2 is unsupported)")?
@@ -423,7 +607,8 @@ pub fn import_value(root: Value) -> Result<ImportDraft> {
     {
         bail!("Unsupported OpenAPI version {version}; supported versions are 3.0, 3.1 and 3.2");
     }
-    let mut servers = server_urls(&root["servers"]);
+    let sanitized_source = sanitize_source(base);
+    let mut servers = server_urls(&root["servers"], base);
     if servers.is_empty() {
         servers.push(String::new());
     }
@@ -440,8 +625,14 @@ pub fn import_value(root: Value) -> Result<ImportDraft> {
     let paths = root["paths"]
         .as_object()
         .context("OpenAPI paths must be an object")?;
-    for (path, item) in paths {
-        let item = match deref(&root, item) {
+    for (path, item_ref) in paths {
+        // A path item can itself be a `$ref` into another file (OpenAPI 3.1 `pathItems`); its own
+        // `servers` override is relative to that file, not the root document.
+        let item_base = origin_document(item_ref["$ref"].as_str().unwrap_or_default())
+            .and_then(|key| doc_bases.get(key))
+            .map(String::as_str)
+            .unwrap_or(base);
+        let item = match deref(&root, item_ref) {
             Ok(v) => v,
             Err(e) => {
                 draft.diagnostics.push(format!("{path}: {e}"));
@@ -465,8 +656,8 @@ pub fn import_value(root: Value) -> Result<ImportDraft> {
                 ..Default::default()
             };
             let mut diagnostics = vec![];
-            let operation_servers = server_urls(&operation["servers"]);
-            let path_servers = server_urls(&item["servers"]);
+            let operation_servers = server_urls(&operation["servers"], item_base);
+            let path_servers = server_urls(&item["servers"], item_base);
             let server = operation_servers.first().or(path_servers.first());
             request.url = format!(
                 "{}{}",
@@ -475,7 +666,7 @@ pub fn import_value(root: Value) -> Result<ImportDraft> {
                     .unwrap_or("{{env.baseUrl}}"),
                 path
             );
-            request.extra.insert("x-openapi".into(),json!({"version":draft.version,"path":path,"method":method,"operationId":operation["operationId"]}));
+            request.extra.insert("x-openapi".into(),json!({"version":draft.version,"path":path,"method":method,"operationId":operation["operationId"],"source":sanitized_source}));
             let mut parameters = std::collections::BTreeMap::new();
             for parameter in item["parameters"]
                 .as_array()
@@ -679,6 +870,47 @@ pub fn import_value(root: Value) -> Result<ImportDraft> {
                     Ok(body) => {
                         if let Some(content) = body["content"].as_object() {
                             for (media, definition) in content {
+                                // Multipart fields need their schema, not a flattened value, to
+                                // tell a file part from a text one; examples don't carry that.
+                                if media == "multipart/form-data" || media == "multipart/mixed" {
+                                    match multipart_parts(&root, &definition["schema"]) {
+                                        Ok((parts, needs_input)) => {
+                                            diagnostics.extend(needs_input);
+                                            bodies.push((
+                                                format!("{media} · Generated"),
+                                                Body::Multipart { parts },
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            diagnostics.push(e.to_string());
+                                            request.blockers.push(format!(
+                                                "{media}: body needs manual configuration"
+                                            ));
+                                            bodies.push((
+                                                format!("{media} · Supply manually"),
+                                                Body::None,
+                                            ));
+                                        }
+                                    }
+                                    continue;
+                                }
+                                // A schema of `{type: string, format: binary}` is a single opaque
+                                // file, not a value this build can generate; point the review at
+                                // picking one rather than blocking the whole operation.
+                                if definition["schema"]["format"] == "binary"
+                                    || media == "application/octet-stream"
+                                {
+                                    diagnostics
+                                        .push(format!("Needs input: select a file for {media}"));
+                                    bodies.push((
+                                        format!("{media} · Select a file"),
+                                        Body::File {
+                                            path: String::new(),
+                                            content_type: media.clone(),
+                                        },
+                                    ));
+                                    continue;
+                                }
                                 let mut examples = vec![];
                                 if let Some(named) = definition["examples"].as_object() {
                                     for (name, example) in named {
@@ -803,6 +1035,91 @@ impl Operation {
             request.blockers.extend(blockers.clone());
         }
         request
+    }
+}
+/// One existing request matched to an operation in a freshly read draft, by method, path and
+/// `operationId` — the identity recorded in `x-openapi` at import time. `changed` compares every
+/// field but the id and test file, so the review can default to leaving an unchanged match alone.
+pub struct Match {
+    pub existing_index: usize,
+    pub operation_index: usize,
+    pub changed: bool,
+}
+/// What reimporting the same source against an existing collection would do: `matches` pairs
+/// requests that still exist in the spec (some changed, some not), `additions` are operations
+/// with no existing match, and `removals` are previously imported requests the spec no longer
+/// defines. Applying is the caller's choice per entry; this only computes the diff.
+pub struct ReimportPlan {
+    pub matches: Vec<Match>,
+    pub additions: Vec<usize>,
+    pub removals: Vec<usize>,
+}
+fn operation_identity(extra: &Extensions) -> Option<(String, String, String)> {
+    let meta = extra.get("x-openapi")?;
+    Some((
+        meta["method"].as_str()?.to_owned(),
+        meta["path"].as_str()?.to_owned(),
+        meta["operationId"].as_str().unwrap_or("").to_owned(),
+    ))
+}
+/// Whole-operation comparison: every field but `id` and `tests`, which reimport always preserves
+/// regardless of what the spec now says. Manual edits to anything else are not tracked field by
+/// field — applying a changed match overwrites them, same as importing has always done, just
+/// scoped to the one operation and shown before it happens.
+fn request_changed(existing: &RequestDefinition, fresh: &RequestDefinition) -> bool {
+    let strip = |r: &RequestDefinition| {
+        let mut v = serde_json::to_value(r).unwrap_or_default();
+        v["id"] = Value::Null;
+        v["tests"] = Value::Null;
+        v
+    };
+    strip(existing) != strip(fresh)
+}
+/// Compares `existing` requests against a freshly read `draft` of the same source, matching by
+/// the provenance `import_value_based` records. Only requests whose recorded source matches
+/// `source` (after the same sanitization) participate — a hand-written request, or one imported
+/// from a different spec, is never proposed for removal just because this spec doesn't mention it.
+pub fn plan_reimport(
+    existing: &[RequestDefinition],
+    draft: &ImportDraft,
+    source: &str,
+) -> ReimportPlan {
+    let source = sanitize_source(source);
+    let mut used = vec![false; draft.operations.len()];
+    let mut matches = vec![];
+    let mut removals = vec![];
+    for (i, request) in existing.iter().enumerate() {
+        let from_this_source = request
+            .extra
+            .get("x-openapi")
+            .and_then(|meta| meta["source"].as_str())
+            == Some(source.as_str());
+        if !from_this_source {
+            continue;
+        }
+        let Some(key) = operation_identity(&request.extra) else {
+            continue;
+        };
+        let found = draft.operations.iter().enumerate().find(|(j, op)| {
+            !used[*j] && operation_identity(&op.request.extra).as_ref() == Some(&key)
+        });
+        match found {
+            Some((j, op)) => {
+                used[j] = true;
+                matches.push(Match {
+                    existing_index: i,
+                    operation_index: j,
+                    changed: request_changed(request, &op.finish()),
+                });
+            }
+            None => removals.push(i),
+        }
+    }
+    let additions = (0..draft.operations.len()).filter(|j| !used[*j]).collect();
+    ReimportPlan {
+        matches,
+        additions,
+        removals,
     }
 }
 #[cfg(test)]
@@ -1212,5 +1529,142 @@ mod tests {
         let root = json!({"openapi":"3.1.0","paths":{"/":{"get":{"parameters":[{"name":"filter","in":"query","style":"deepObject","schema":{"type":"object"}}]}}}});
         let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
         assert!(!draft.operations[0].finish().blockers.is_empty());
+    }
+    #[test]
+    fn multipart_separates_file_and_text_parts() {
+        let root = json!({"openapi":"3.1.0","paths":{"/upload":{"post":{"requestBody":{"content":{"multipart/form-data":{"schema":{"type":"object","properties":{
+            "title":{"type":"string","default":"Report"},
+            "attachment":{"type":"string","format":"binary"}
+        }}}}}}}}});
+        let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
+        let op = &draft.operations[0];
+        assert!(
+            op.diagnostics
+                .iter()
+                .any(|d| d.contains("Needs input") && d.contains("attachment")),
+            "{:?}",
+            op.diagnostics
+        );
+        let Body::Multipart { parts } = &op.bodies[0].1 else {
+            panic!("expected a multipart body");
+        };
+        let title = parts.iter().find(|p| p.name == "title").unwrap();
+        assert!(!title.file);
+        assert_eq!(title.value, "Report");
+        let attachment = parts.iter().find(|p| p.name == "attachment").unwrap();
+        assert!(attachment.file);
+        assert!(attachment.value.is_empty());
+    }
+    #[test]
+    fn octet_stream_body_asks_for_a_file_without_blocking_send() {
+        let root = json!({"openapi":"3.1.0","paths":{"/upload":{"post":{"requestBody":{"content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}}}}}});
+        let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
+        let op = &draft.operations[0];
+        assert!(op.diagnostics.iter().any(|d| d.contains("Needs input")));
+        assert!(op.request.blockers.is_empty(), "{:?}", op.request.blockers);
+        assert!(matches!(op.bodies[0].1, Body::File { .. }));
+    }
+    #[test]
+    fn relative_root_servers_resolve_against_the_spec_s_own_source() {
+        let base = "https://api.test/v1/openapi.json";
+        let root = json!({"openapi":"3.1.0","servers":[{"url":"/v2"}],"paths":{"/":{"get":{}}}});
+        let draft = import_value_based(root, base, &BTreeMap::new()).unwrap();
+        assert_eq!(draft.servers, vec!["https://api.test/v2".to_string()]);
+    }
+    #[test]
+    fn a_path_item_embedded_from_another_file_resolves_its_own_server_override() {
+        let base = "https://api.test/v1/openapi.json";
+        let mut root =
+            json!({"openapi":"3.1.0","paths":{"/widgets":{"$ref":"widgets.json#/item"}}});
+        let fetched = BTreeMap::from([(
+            "https://api.test/v1/widgets.json".to_string(),
+            json!({"item":{"servers":[{"url":"/other"}],"get":{"operationId":"getWidget"}}}),
+        )]);
+        assert!(inline_external(&mut root, base, &fetched).is_empty());
+        let doc_bases = document_keys(&fetched);
+        let draft = import_value_based(root, base, &doc_bases).unwrap();
+        assert_eq!(draft.operations.len(), 1);
+        assert!(
+            draft.operations[0]
+                .request
+                .url
+                .starts_with("https://api.test/other"),
+            "{}",
+            draft.operations[0].request.url
+        );
+    }
+    #[test]
+    fn external_example_values_are_fetched_and_inlined() {
+        let base = "https://api.test/v1/openapi.json";
+        let mut root = json!({"openapi":"3.1.0","paths":{"/":{"post":{"requestBody":{"content":{"application/json":{"examples":{"sample":{"externalValue":"examples/sample.json"}}}}}}}}});
+        let uris = external_examples(&root, base);
+        assert_eq!(
+            uris,
+            vec!["https://api.test/v1/examples/sample.json".to_string()]
+        );
+        let fetched = BTreeMap::from([(uris[0].clone(), br#"{"id":7}"#.to_vec())]);
+        let notes = inline_examples(&mut root, base, &BTreeMap::new(), &fetched);
+        assert!(notes.is_empty(), "{notes:?}");
+        let draft = import_value_based(root, base, &BTreeMap::new()).unwrap();
+        let Body::Json { text } = &draft.operations[0].bodies[0].1 else {
+            panic!("expected a JSON body");
+        };
+        assert!(text.contains('7'), "{text}");
+    }
+    #[test]
+    fn an_external_example_that_was_not_retrieved_is_reported() {
+        let base = "https://api.test/v1/openapi.json";
+        let mut root = json!({"a":{"externalValue":"missing.json"}});
+        let notes = inline_examples(&mut root, base, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("missing.json"), "{notes:?}");
+    }
+    #[test]
+    fn plan_reimport_finds_updates_additions_and_removals() {
+        let base = "https://api.test/openapi.json";
+        let v1 = json!({"openapi":"3.1.0","paths":{
+            "/users/{id}":{"get":{"operationId":"getUser"}},
+            "/orders":{"get":{"operationId":"listOrders"}}
+        }});
+        let draft_v1 = import_value_based(v1, base, &BTreeMap::new()).unwrap();
+        let existing: Vec<_> = draft_v1.operations.iter().map(Operation::finish).collect();
+
+        let v2 = json!({"openapi":"3.1.0","paths":{
+            "/users/{id}":{"get":{"operationId":"getUser","summary":"Get a user"}},
+            "/orders/{id}":{"delete":{"operationId":"deleteOrder"}}
+        }});
+        let draft_v2 = import_value_based(v2, base, &BTreeMap::new()).unwrap();
+
+        let plan = plan_reimport(&existing, &draft_v2, base);
+        assert_eq!(plan.matches.len(), 1, "only getUser still exists");
+        assert!(plan.matches[0].changed, "the summary changed the request");
+        assert_eq!(existing[plan.matches[0].existing_index].name, "getUser");
+
+        assert_eq!(plan.removals.len(), 1, "listOrders is gone from the spec");
+        assert_eq!(existing[plan.removals[0]].name, "listOrders");
+
+        assert_eq!(plan.additions.len(), 1, "deleteOrder is new");
+        assert_eq!(
+            draft_v2.operations[plan.additions[0]].request.name,
+            "deleteOrder"
+        );
+    }
+    #[test]
+    fn plan_reimport_leaves_requests_from_another_source_alone() {
+        let base = "https://api.test/openapi.json";
+        let v1 = json!({"openapi":"3.1.0","paths":{"/":{"get":{"operationId":"op"}}}});
+        let mut hand_written = import_value_based(v1.clone(), base, &BTreeMap::new())
+            .unwrap()
+            .operations
+            .remove(0)
+            .finish();
+        hand_written.extra.remove("x-openapi");
+        let v2 = json!({"openapi":"3.1.0","paths":{"/other":{"get":{"operationId":"other"}}}});
+        let draft_v2 = import_value_based(v2, base, &BTreeMap::new()).unwrap();
+        let plan = plan_reimport(&[hand_written], &draft_v2, base);
+        assert!(
+            plan.removals.is_empty(),
+            "a request with no provenance is never proposed for removal"
+        );
     }
 }

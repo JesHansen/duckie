@@ -309,6 +309,10 @@ impl Duckie {
                     self.request_action(Pending::Import);
                     ui.close();
                 }
+                if ui.button("Update from spec…").clicked() {
+                    self.request_action(Pending::UpdateFromSpec);
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button("Save collection              Ctrl+S").clicked() {
                     self.save_collection(false);
