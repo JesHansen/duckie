@@ -1424,18 +1424,20 @@ impl eframe::App for Duckie {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         if self.prefs.sidebar && ui.available_width() > 1000.0 {
-            egui::Panel::left("sidebar")
-                .default_size(240.0)
+            let panel = egui::Panel::left("sidebar")
+                .default_size(self.prefs.sidebar_width.unwrap_or(240.0))
                 .size_range(190.0..=350.0)
                 .resizable(true)
                 .show(ui, |ui| {
                     ui.add_enabled_ui(!self.io_busy, |ui| self.sidebar(ui));
                 });
+            // Read back what the user dragged it to; `App::save` persists it.
+            self.prefs.sidebar_width = Some(panel.response.rect.width());
         }
         egui::CentralPanel::default().show(ui, |ui| {
-            egui::Panel::top("request-pane")
+            let panel = egui::Panel::top("request-pane")
                 .resizable(true)
-                .default_size(330.0)
+                .default_size(self.prefs.request_height.unwrap_or(330.0))
                 .min_size(220.0)
                 .max_size((ui.available_height() - 170.0).max(220.0))
                 .show(ui, |ui| {
@@ -1450,6 +1452,7 @@ impl eframe::App for Duckie {
                         });
                     });
                 });
+            self.prefs.request_height = Some(panel.response.rect.height());
             egui::CentralPanel::default().show(ui, |ui| self.response(ui));
         });
         self.dialogs(&ctx);
@@ -1490,6 +1493,8 @@ impl eframe::App for Duckie {
         if self.bench.is_some() {
             return;
         }
+        self.prefs.selected = self.drafts.get(self.selected).map(|d| d.request.id.clone());
+        self.prefs.environment = self.envs.get(self.env_index).map(|e| e.name.clone());
         eframe::set_value(storage, "duckie-preferences", &self.prefs);
     }
     fn persist_egui_memory(&self) -> bool {
@@ -1622,6 +1627,44 @@ mod tests {
         app.reorder(1, true);
         app.reorder(1, false);
         assert_eq!(shape(&app), before);
+    }
+    #[test]
+    fn opening_a_collection_restores_the_remembered_request_and_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut collection =
+            duckie_storage::Collection::new(dir.path().to_path_buf(), "c".into()).unwrap();
+        collection.requests = ["a", "b", "c"]
+            .iter()
+            .map(|id| duckie_storage::StoredRequest {
+                definition: RequestDefinition {
+                    id: (*id).into(),
+                    ..Default::default()
+                },
+                source: String::new(),
+            })
+            .collect();
+        collection.environments = ["dev", "staging"]
+            .iter()
+            .map(|name| Environment {
+                name: (*name).into(),
+                ..Default::default()
+            })
+            .collect();
+
+        let ctx = egui::Context::default();
+        let mut app = Duckie::new(&eframe::CreationContext::_new_kittest(ctx.clone()));
+        app.prefs.selected = Some("c".into());
+        app.prefs.environment = Some("staging".into());
+        app.use_collection(collection.clone());
+        assert_eq!(app.drafts[app.selected].request.id, "c");
+        assert_eq!(app.envs[app.env_index].name, "staging");
+
+        // Names from another collection must not select something arbitrary.
+        app.prefs.selected = Some("not-here".into());
+        app.prefs.environment = Some("prod".into());
+        app.use_collection(collection);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.env_index, 0);
     }
     #[test]
     fn page_size_shrinks_only_for_very_long_lines() {

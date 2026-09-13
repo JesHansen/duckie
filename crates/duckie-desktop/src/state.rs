@@ -86,6 +86,19 @@ pub struct Preferences {
     /// Folder names the user has collapsed in the sidebar.
     #[serde(default)]
     pub collapsed: BTreeSet<String>,
+    /// Request id and environment name to restore when the same collection reopens. Both are
+    /// matched by name rather than index, so they degrade to the first entry for another
+    /// collection instead of selecting something arbitrary.
+    #[serde(default)]
+    pub selected: Option<String>,
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// Split positions. egui's own memory is deliberately not persisted, because text editor
+    /// undo stacks can hold credentials, so these are carried here instead.
+    #[serde(default)]
+    pub sidebar_width: Option<f32>,
+    #[serde(default)]
+    pub request_height: Option<f32>,
 }
 #[derive(Clone, Copy)]
 pub enum Pending {
@@ -584,9 +597,19 @@ impl Duckie {
         if self.drafts.is_empty() {
             self.drafts.push(Draft::default());
         }
-        self.selected = 0;
+        self.selected = self
+            .prefs
+            .selected
+            .as_ref()
+            .and_then(|id| self.drafts.iter().position(|d| &d.request.id == id))
+            .unwrap_or(0);
         self.envs = c.environments.clone();
-        self.env_index = 0;
+        self.env_index = self
+            .prefs
+            .environment
+            .as_ref()
+            .and_then(|name| self.envs.iter().position(|e| &e.name == name))
+            .unwrap_or(0);
         self.secrets = c.secrets.environments.clone();
         self.remember.clear();
         for (env, values) in &self.secrets {

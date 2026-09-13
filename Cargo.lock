@@ -873,6 +873,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "windows-sys 0.61.2",
