@@ -1,0 +1,1510 @@
+use crate::{editor, state::*};
+use duckie_model::*;
+use eframe::egui::{self, Color32, RichText};
+use std::time::Duration;
+
+fn accent(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(130, 183, 255)
+    } else {
+        Color32::from_rgb(30, 83, 161)
+    }
+}
+fn warning(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(241, 202, 119)
+    } else {
+        Color32::from_rgb(137, 82, 0)
+    }
+}
+fn success(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(139, 220, 171)
+    } else {
+        Color32::from_rgb(24, 114, 66)
+    }
+}
+pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
+    let mut changed = false;
+    let mut remove = None;
+    egui::Grid::new(id)
+        .num_columns(4)
+        .spacing([8.0, 6.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.weak("Use");
+            ui.weak("Name");
+            ui.weak("Value");
+            ui.end_row();
+            for (i, row) in rows.iter_mut().enumerate() {
+                ui.push_id(i, |ui| {
+                    changed |= ui
+                        .checkbox(&mut row.enabled, "")
+                        .on_hover_text("Include this row")
+                        .changed();
+                    let edit = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut row.name)
+                                .desired_width(200.0)
+                                .hint_text("Name"),
+                        )
+                        .changed()
+                        | ui.add(
+                            egui::TextEdit::singleline(&mut row.value)
+                                .desired_width((ui.available_width() - 48.0).max(180.0))
+                                .hint_text("Value"),
+                        )
+                        .changed();
+                    if edit {
+                        row.raw = None;
+                        changed = true;
+                    }
+                    if ui.small_button("×").on_hover_text("Remove row").clicked() {
+                        remove = Some(i);
+                    }
+                    ui.end_row();
+                });
+            }
+        });
+    if let Some(index) = remove {
+        rows.remove(index);
+        changed = true;
+    }
+    if ui.button("+ Add row").clicked() {
+        rows.push(Row::new("", ""));
+        changed = true;
+    }
+    changed
+}
+pub fn variables(ui: &mut egui::Ui, id: &str, values: &mut Values) -> bool {
+    let mut entries: Vec<Row> = values.iter().map(|(k, v)| Row::new(k, v)).collect();
+    if rows(ui, id, &mut entries) {
+        *values = entries.into_iter().map(|r| (r.name, r.value)).collect();
+        true
+    } else {
+        false
+    }
+}
+/// Draws one of the request editors with the shared find bar above it, records whether the
+/// caret is inside it, and reveals either the current match or a pending Go-to-line.
+fn request_code(
+    ui: &mut egui::Ui,
+    id: &str,
+    text: &mut String,
+    rows: usize,
+    find: &mut editor::Find,
+    focused: &mut bool,
+    goto: Option<u32>,
+) -> bool {
+    let found = editor::hits(text, &find.query);
+    let mut reveal = None;
+    if find.open {
+        ui.horizontal(|ui| {
+            if editor::find_bar(ui, "editor-find", find, found.len()) {
+                reveal = found.get(find.index).map(|hit| hit.chars.clone());
+            }
+            if ui.button("Close").clicked() {
+                find.open = false;
+            }
+        });
+    }
+    if let Some(line) = goto {
+        reveal = editor::line_range(text, line);
+    }
+    let result = editor::code(ui, id, text, rows, &found, find.index, reveal);
+    *focused |= result.focused;
+    result.changed
+}
+impl Duckie {
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, KeyboardShortcut as Shortcut, Modifiers};
+        let pressed =
+            |modifiers, key| ctx.input_mut(|i| i.consume_shortcut(&Shortcut::new(modifiers, key)));
+        if pressed(Modifiers::CTRL | Modifiers::SHIFT, Key::O) {
+            self.request_action(Pending::Import);
+        }
+        if pressed(Modifiers::CTRL, Key::O) {
+            self.request_action(Pending::Open);
+        }
+        if pressed(Modifiers::CTRL, Key::N) {
+            self.new_request();
+        }
+        if pressed(Modifiers::CTRL, Key::S) {
+            self.save_collection(false);
+        }
+        if pressed(Modifiers::CTRL | Modifiers::SHIFT, Key::Enter) {
+            self.rerun();
+        }
+        if pressed(Modifiers::CTRL, Key::Enter) {
+            self.send();
+        }
+        if pressed(Modifiers::CTRL, Key::L) {
+            self.focus_url = true;
+        }
+        if pressed(Modifiers::CTRL, Key::B) {
+            self.prefs.sidebar = !self.prefs.sidebar;
+        }
+        if pressed(Modifiers::CTRL, Key::K) {
+            self.prefs.sidebar = true;
+            ctx.memory_mut(|m| m.request_focus(egui::Id::new("request-search")));
+        }
+        // Ctrl+F belongs to whichever editor holds the caret; the response preview is the default.
+        if pressed(Modifiers::CTRL, Key::F) {
+            // An already-open editor find keeps Ctrl+F, so pressing it twice does not jump away.
+            if (self.editor_focused || self.editor_find.open)
+                && matches!(self.request_tab, RequestTab::Body | RequestTab::Tests)
+            {
+                self.editor_find.open = true;
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("editor-find")));
+            } else {
+                self.response_tab = ResponseTab::Body;
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("response-find")));
+            }
+        }
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if self.pending.is_some() {
+                self.pending = None;
+            } else if self.env_dialog {
+                self.env_dialog = false;
+            } else if let Some(import) = self.import.take() {
+                if let Some(token) = import.cancel {
+                    token.cancel();
+                }
+            } else if let Some((_, token, _)) = &self.active {
+                token.cancel();
+            }
+        }
+    }
+    pub fn top_menu(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("New request                 Ctrl+N").clicked() {
+                    self.new_request();
+                    ui.close();
+                }
+                if ui.button("New collection…").clicked() {
+                    self.request_action(Pending::NewCollection);
+                    ui.close();
+                }
+                if ui.button("Open collection…          Ctrl+O").clicked() {
+                    self.request_action(Pending::Open);
+                    ui.close();
+                }
+                if ui.button("Import OpenAPI…    Ctrl+Shift+O").clicked() {
+                    self.request_action(Pending::Import);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Save collection              Ctrl+S").clicked() {
+                    self.save_collection(false);
+                    ui.close();
+                }
+                if ui.button("Save a copy to new folder…").clicked() {
+                    self.save_collection(true);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        self.collection.is_some(),
+                        egui::Button::new("Reload from disk…"),
+                    )
+                    .clicked()
+                {
+                    self.request_action(Pending::Reload);
+                    ui.close();
+                }
+            });
+            ui.menu_button("Request", |ui| {
+                if ui
+                    .add_enabled(
+                        self.active.is_none(),
+                        egui::Button::new("Send                         Ctrl+Enter"),
+                    )
+                    .clicked()
+                {
+                    self.send();
+                    ui.close();
+                }
+                if ui.button("Duplicate request").clicked() {
+                    let d = &self.drafts[self.selected];
+                    let mut r = d.request.clone();
+                    r.id = new_id();
+                    r.name.push_str(" copy");
+                    r.tests.file.clear();
+                    self.drafts.push(Draft {
+                        request: r,
+                        source: d.source.clone(),
+                        dirty: true,
+                        ..Default::default()
+                    });
+                    self.selected = self.drafts.len() - 1;
+                    ui.close();
+                }
+                if ui.button("Close response").clicked() {
+                    self.responses
+                        .remove(&self.drafts[self.selected].request.id);
+                    ui.close();
+                }
+                if ui.button("Delete request…").clicked() {
+                    self.delete = Some(self.selected);
+                    ui.close();
+                }
+            });
+            ui.menu_button("View", |ui| {
+                ui.checkbox(&mut self.prefs.sidebar, "Request sidebar     Ctrl+B");
+                ui.separator();
+                let old = self.prefs.appearance;
+                ui.selectable_value(&mut self.prefs.appearance, 0, "System appearance");
+                ui.selectable_value(&mut self.prefs.appearance, 1, "Light");
+                ui.selectable_value(&mut self.prefs.appearance, 2, "Dark");
+                if old != self.prefs.appearance {
+                    self.apply_theme();
+                }
+            });
+            if ui.button("Help").clicked() {
+                self.about = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("Edit…")
+                    .on_hover_text("Edit local environments and secrets")
+                    .clicked()
+                {
+                    self.env_dialog = true;
+                }
+                egui::ComboBox::from_id_salt("environment")
+                    .selected_text(&self.envs[self.env_index].name)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (i, env) in self.envs.iter().enumerate() {
+                            ui.selectable_value(&mut self.env_index, i, &env.name);
+                        }
+                    });
+                ui.weak("Environment");
+            });
+        });
+    }
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("DUCKIE").strong().size(18.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("+")
+                    .on_hover_text("New request · Ctrl+N")
+                    .clicked()
+                {
+                    self.new_request();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.weak(
+            self.collection
+                .as_ref()
+                .map(|c| c.manifest.name.as_str())
+                .unwrap_or("Scratch workspace"),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .id(egui::Id::new("request-search"))
+                .hint_text("Find requests…   Ctrl+K")
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(4.0);
+        let search = self.search.to_lowercase();
+        let filtered: Vec<usize> = self
+            .drafts
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                format!(
+                    "{} {} {} {}",
+                    d.request.name, d.request.method, d.request.url, d.request.folder
+                )
+                .to_lowercase()
+                .contains(&search)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        egui::ScrollArea::vertical()
+            .id_salt("requests")
+            .max_height((ui.available_height() - 125.0).max(100.0))
+            .show_rows(ui, 38.0, filtered.len(), |ui, range| {
+                for index in range {
+                    let i = filtered[index];
+                    let d = &self.drafts[i];
+                    let text = format!(
+                        "{:6} {}{}",
+                        d.request.method,
+                        d.request.name,
+                        if d.dirty { " *" } else { "" }
+                    );
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 32.0],
+                            egui::Button::selectable(
+                                self.selected == i,
+                                RichText::new(text).size(13.0),
+                            ),
+                        )
+                        .on_hover_text(format!("{}\n{}", d.request.folder, d.request.address()))
+                        .clicked()
+                    {
+                        self.selected = i;
+                        self.clock += 1;
+                        if let Some(v) = self.responses.get_mut(&self.drafts[i].request.id) {
+                            v.viewed = self.clock;
+                        }
+                    }
+                }
+            });
+        ui.separator();
+        if ui.button("Open collection…").clicked() {
+            self.request_action(Pending::Open);
+        }
+        if ui.button("New collection…").clicked() {
+            self.request_action(Pending::NewCollection);
+        }
+        if ui.button("Import OpenAPI…").clicked() {
+            self.request_action(Pending::Import);
+        }
+    }
+    fn request_header(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.drafts[self.selected].request.name)
+                        .font(egui::FontId::proportional(18.0))
+                        .frame(egui::Frame::NONE)
+                        .desired_width((ui.available_width() - 105.0).max(100.0)),
+                )
+                .changed();
+            if self.drafts[self.selected].dirty {
+                ui.weak("*");
+            }
+            if ui
+                .button("Save")
+                .on_hover_text("Save collection · Ctrl+S")
+                .clicked()
+            {
+                self.save_collection(false);
+            }
+        });
+        ui.add_space(4.0);
+        let mut send = false;
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            let d = &mut self.drafts[self.selected];
+            egui::ComboBox::from_id_salt("method")
+                .selected_text(RichText::new(&d.request.method).color(accent(ui)).strong())
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    for method in [
+                        "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE",
+                        "QUERY",
+                    ] {
+                        changed |= ui
+                            .selectable_value(&mut d.request.method, method.into(), method)
+                            .changed();
+                    }
+                    ui.separator();
+                    ui.label("Custom method");
+                    changed |= ui.text_edit_singleline(&mut d.request.method).changed();
+                });
+            let mut address = d.request.address();
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut address)
+                    .id_salt("url")
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("Enter a URL, or use {{env.baseUrl}}/path")
+                    .desired_width((ui.available_width() - 110.0).max(100.0)),
+            );
+            if field.changed() {
+                d.request.set_address(&address);
+                changed = true;
+            }
+            if self.focus_url {
+                field.request_focus();
+                self.focus_url = false;
+            }
+            if let Some((id, _, _)) = &self.active {
+                if id == &d.request.id {
+                    cancel = ui
+                        .add_sized(
+                            [95.0, 32.0],
+                            egui::Button::new(if self.active_testing {
+                                "Stop tests"
+                            } else {
+                                "Cancel"
+                            }),
+                        )
+                        .clicked();
+                } else {
+                    ui.add_enabled(false, egui::Button::new("Send"));
+                }
+            } else {
+                send = ui
+                    .add_sized(
+                        [95.0, 32.0],
+                        egui::Button::new(RichText::new("Send").strong().color(
+                            if ui.visuals().dark_mode {
+                                Color32::from_rgb(17, 30, 49)
+                            } else {
+                                Color32::WHITE
+                            },
+                        ))
+                        .fill(accent(ui)),
+                    )
+                    .on_hover_text("Send once · Ctrl+Enter")
+                    .clicked();
+            }
+        });
+        if changed {
+            self.touch();
+        }
+        if send {
+            self.send();
+        }
+        if cancel && let Some((_, token, _)) = &self.active {
+            token.cancel();
+        }
+        if !self.drafts[self.selected].error.is_empty() {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                &self.drafts[self.selected].error,
+            );
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            for (tab, label) in [
+                (RequestTab::Params, "Params"),
+                (RequestTab::Headers, "Headers"),
+                (RequestTab::Auth, "Auth"),
+                (RequestTab::Body, "Body"),
+                (RequestTab::Tests, "Tests"),
+                (RequestTab::Settings, "Settings"),
+            ] {
+                ui.selectable_value(&mut self.request_tab, tab, label);
+            }
+        });
+        ui.separator();
+    }
+    fn editor(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        let mut run_tests = false;
+        // Recomputed below by whichever code editor this tab draws, for next frame's Ctrl+F.
+        self.editor_focused = false;
+        match self.request_tab {
+            RequestTab::Params => {
+                ui.label(RichText::new("Path / request variables").strong());
+                changed |= variables(
+                    ui,
+                    "request-vars",
+                    &mut self.drafts[self.selected].request.variables,
+                );
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new("Query parameters").strong());
+                changed |= rows(ui, "query", &mut self.drafts[self.selected].request.query);
+            }
+            RequestTab::Headers => {
+                changed |= rows(
+                    ui,
+                    "headers",
+                    &mut self.drafts[self.selected].request.headers,
+                );
+                ui.add_space(8.0);
+                ui.weak("Authentication and body headers are added when you send. Duplicate manual auth headers block Send.");
+            }
+            RequestTab::Auth => {
+                let d = &mut self.drafts[self.selected];
+                let mut bearer = d.request.auth.bearer.is_some();
+                let mut api = d.request.auth.api_key.is_some();
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut bearer, "Bearer token").changed() {
+                        d.request.auth.bearer = bearer.then(|| SecretBinding {
+                            secret: "internalBearer".into(),
+                        });
+                        changed = true;
+                    }
+                    if ui.checkbox(&mut api, "API key header").changed() {
+                        d.request.auth.api_key = api.then(|| ApiKey {
+                            header: "X-API-Key".into(),
+                            secret: "apiKey".into(),
+                        });
+                        changed = true;
+                    }
+                });
+                let env = self.envs[self.env_index].name.clone();
+                if let Some(b) = &mut d.request.auth.bearer {
+                    ui.add_space(8.0);
+                    ui.strong("Bearer token");
+                    ui.horizontal(|ui| {
+                        ui.label("Secret key");
+                        changed |= ui.text_edit_singleline(&mut b.secret).changed();
+                    });
+                    changed |= secret_input(
+                        ui,
+                        &env,
+                        &b.secret,
+                        &mut self.secrets,
+                        &mut self.remember,
+                        &mut self.reveal,
+                    );
+                }
+                if let Some(k) = &mut d.request.auth.api_key {
+                    ui.add_space(8.0);
+                    ui.strong("API key");
+                    ui.horizontal(|ui| {
+                        ui.label("Header name");
+                        changed |= ui.text_edit_singleline(&mut k.header).changed();
+                        ui.label("Secret key");
+                        changed |= ui.text_edit_singleline(&mut k.secret).changed();
+                    });
+                    changed |= secret_input(
+                        ui,
+                        &env,
+                        &k.secret,
+                        &mut self.secrets,
+                        &mut self.remember,
+                        &mut self.reveal,
+                    );
+                }
+                ui.add_space(8.0);
+                ui.weak("Paste a token with or without the Bearer prefix. Values stay in this session unless remembered.");
+                if self.collection.is_none() {
+                    ui.weak("Save chooses a collection folder before remembered credentials can be written.");
+                }
+            }
+            RequestTab::Body => {
+                let d = &mut self.drafts[self.selected];
+                let mut mode = match d.request.body {
+                    Body::None => 0,
+                    Body::Json { .. } => 1,
+                    Body::Text { .. } => 2,
+                    Body::Form { .. } => 3,
+                    Body::Multipart { .. } => 4,
+                    Body::File { .. } => 5,
+                };
+                let old = mode;
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("body-mode")
+                        .selected_text(
+                            [
+                                "None",
+                                "JSON",
+                                "Text",
+                                "Form URL-encoded",
+                                "Multipart",
+                                "File",
+                            ][mode],
+                        )
+                        .show_ui(ui, |ui| {
+                            for (i, label) in [
+                                "None",
+                                "JSON",
+                                "Text",
+                                "Form URL-encoded",
+                                "Multipart",
+                                "File",
+                            ]
+                            .iter()
+                            .enumerate()
+                            {
+                                ui.selectable_value(&mut mode, i, *label);
+                            }
+                        });
+                    ui.weak("Body bytes change only when you edit or format.");
+                });
+                if mode != old {
+                    let text = match &d.request.body {
+                        Body::Text { text } | Body::Json { text } => text.clone(),
+                        _ => String::new(),
+                    };
+                    d.request.body = match mode {
+                        1 => Body::Json { text },
+                        2 => Body::Text { text },
+                        3 => Body::Form { rows: vec![] },
+                        4 => Body::Multipart { parts: vec![] },
+                        5 => Body::File {
+                            path: String::new(),
+                            content_type: "application/octet-stream".into(),
+                        },
+                        _ => Body::None,
+                    };
+                    changed = true;
+                }
+                let is_json = matches!(d.request.body, Body::Json { .. });
+                match &mut d.request.body {
+                    Body::None => {
+                        ui.add_space(25.0);
+                        ui.weak("This request has no body.");
+                    }
+                    Body::Json { text } | Body::Text { text } => {
+                        if is_json && ui.button("Format JSON").clicked() {
+                            match serde_json::from_str::<serde_json::Value>(text) {
+                                Ok(v) => {
+                                    *text = serde_json::to_string_pretty(&v).unwrap();
+                                    changed = true;
+                                }
+                                Err(e) => d.error = format!("JSON: {e}"),
+                            }
+                        }
+                        changed |= request_code(
+                            ui,
+                            "body-code",
+                            text,
+                            9,
+                            &mut self.editor_find,
+                            &mut self.editor_focused,
+                            None,
+                        );
+                        ui.weak("{{variables}} use literal substitution; inserted values are not automatically JSON-escaped.");
+                    }
+                    Body::Form { rows: fields } => changed |= rows(ui, "form", fields),
+                    Body::Multipart { parts } => {
+                        let mut remove = None;
+                        for (i, p) in parts.iter_mut().enumerate() {
+                            ui.push_id(i, |ui| {
+                                ui.horizontal(|ui| {
+                                    changed |= ui.checkbox(&mut p.enabled, "").changed();
+                                    changed |= ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut p.name)
+                                                .desired_width(130.0)
+                                                .hint_text("Name"),
+                                        )
+                                        .changed();
+                                    changed |= ui.checkbox(&mut p.file, "File").changed();
+                                    changed |= ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut p.value)
+                                                .desired_width(280.0)
+                                                .hint_text("Value or selected file"),
+                                        )
+                                        .changed();
+                                    if p.file
+                                        && ui.button("Browse…").clicked()
+                                        && let Some(path) = rfd::FileDialog::new().pick_file()
+                                    {
+                                        p.value = path.to_string_lossy().into_owned();
+                                        changed = true;
+                                    }
+                                    if ui.small_button("×").clicked() {
+                                        remove = Some(i);
+                                    }
+                                });
+                            });
+                        }
+                        if let Some(i) = remove {
+                            parts.remove(i);
+                            changed = true;
+                        }
+                        if ui.button("+ Add part").clicked() {
+                            parts.push(Part {
+                                enabled: true,
+                                name: String::new(),
+                                value: String::new(),
+                                file: false,
+                            });
+                            changed = true;
+                        }
+                    }
+                    Body::File { path, content_type } => {
+                        ui.horizontal(|ui| {
+                            ui.label("Content type");
+                            changed |= ui.text_edit_singleline(content_type).changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(if path.is_empty() {
+                                "No file selected"
+                            } else {
+                                path.as_str()
+                            });
+                            if ui.button("Choose file…").clicked()
+                                && let Some(p) = rfd::FileDialog::new().pick_file()
+                            {
+                                *path = p.to_string_lossy().into_owned();
+                                changed = true;
+                            }
+                        });
+                        ui.weak("Streams from disk. An absolute file path is not portable with the collection.");
+                    }
+                }
+            }
+            RequestTab::Tests => {
+                let ready = self
+                    .responses
+                    .get(&self.drafts[self.selected].request.id)
+                    .is_some_and(|v| v.result.outcome == Outcome::Complete)
+                    && self.active.is_none();
+                let goto = self.goto_line.take();
+                let d = &mut self.drafts[self.selected];
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .checkbox(&mut d.request.tests.enabled, "Run after Send")
+                        .changed();
+                    if ui.button("Insert example").clicked() {
+                        d.source.push_str(EXAMPLE);
+                        changed = true;
+                    }
+                    run_tests = ui
+                        .add_enabled(ready, egui::Button::new("Run tests"))
+                        .on_hover_text("Does not send an HTTP request · Ctrl+Shift+Enter")
+                        .clicked();
+                });
+                if d.source.is_empty() {
+                    ui.weak("Assert a response with test(), expect(), and response. JavaScript runs only when you ask.");
+                }
+                changed |= request_code(
+                    ui,
+                    "test-code",
+                    &mut d.source,
+                    10,
+                    &mut self.editor_find,
+                    &mut self.editor_focused,
+                    goto,
+                );
+                ui.weak("JavaScript · 2 second limit · No network, filesystem, or Node.js API");
+            }
+            RequestTab::Settings => {
+                let d = &mut self.drafts[self.selected];
+                egui::Grid::new("settings").num_columns(2).show(ui, |ui| {
+                    ui.label("Folder / group");
+                    changed |= ui.text_edit_singleline(&mut d.request.folder).changed();
+                    ui.end_row();
+                    ui.label("Timeout (ms)");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut d.request.timeout_ms).range(1..=3_600_000))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Encoded response cap (MiB)");
+                    let mut limit = d.request.encoded_limit / MIB;
+                    if ui
+                        .add(egui::DragValue::new(&mut limit).range(1..=1024))
+                        .changed()
+                    {
+                        d.request.encoded_limit = limit * MIB;
+                        changed = true;
+                    }
+                    ui.end_row();
+                    ui.label("Decoded response cap (MiB)");
+                    let mut limit = d.request.decoded_limit / MIB;
+                    if ui
+                        .add(egui::DragValue::new(&mut limit).range(1..=1024))
+                        .changed()
+                    {
+                        d.request.decoded_limit = limit * MIB;
+                        changed = true;
+                    }
+                    ui.end_row();
+                });
+                let old = match d.request.proxy {
+                    ProxyMode::System => 0,
+                    ProxyMode::Direct => 1,
+                    ProxyMode::Explicit { .. } => 2,
+                };
+                let mut mode = old;
+                ui.horizontal(|ui| {
+                    ui.label("Proxy");
+                    for (i, name) in ["System", "Direct", "Explicit"].iter().enumerate() {
+                        ui.selectable_value(&mut mode, i, *name);
+                    }
+                });
+                if old != mode {
+                    d.request.proxy = match mode {
+                        1 => ProxyMode::Direct,
+                        2 => ProxyMode::Explicit {
+                            url: String::new(),
+                            bypass: String::new(),
+                        },
+                        _ => ProxyMode::System,
+                    };
+                    changed = true;
+                }
+                if let ProxyMode::Explicit { url, bypass } = &mut d.request.proxy {
+                    ui.horizontal(|ui| {
+                        ui.label("Proxy URL");
+                        changed |= ui.text_edit_singleline(url).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Bypass hosts");
+                        changed |= ui.text_edit_singleline(bypass).changed();
+                    });
+                }
+                ui.weak("Windows certificate trust · TLS verification on · No automatic redirects or retries");
+                if !d.request.blockers.is_empty() {
+                    ui.separator();
+                    ui.colored_label(warning(ui), "Import issues block Send");
+                    for b in &d.request.blockers {
+                        ui.label(b);
+                    }
+                    if ui
+                        .button("I corrected these fields — clear import issues")
+                        .clicked()
+                    {
+                        d.request.blockers.clear();
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.touch();
+        }
+        if run_tests {
+            self.rerun();
+        }
+    }
+    fn response(&mut self, ui: &mut egui::Ui) {
+        let id = self.drafts[self.selected].request.id.clone();
+        let Some(view) = self.responses.get_mut(&id) else {
+            ui.label(RichText::new("Response").strong());
+            ui.separator();
+            ui.add_space((ui.available_height() * 0.25).max(16.0));
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Send a request to see its response").size(19.0));
+                ui.add_space(8.0);
+                ui.weak("Enter an endpoint above, then press Ctrl+Enter.");
+            });
+            return;
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Response");
+            if let Some(status) = view.result.status {
+                let color = if (200..300).contains(&status) {
+                    success(ui)
+                } else {
+                    warning(ui)
+                };
+                ui.label(
+                    RichText::new(format!("{status} {}", view.result.status_text))
+                        .color(color)
+                        .strong(),
+                );
+            }
+            ui.weak(format!("{} ms", view.result.duration_ms));
+            ui.weak(format!("{} decoded", size(view.result.body.len())));
+            if let Some(report) = &view.report {
+                let passed = report.tests.iter().filter(|t| t.passed).count();
+                ui.label(format!(
+                    "Tests: {passed} passed, {} failed",
+                    report.tests.len() - passed
+                ));
+                if report.suite_error.is_some() {
+                    ui.colored_label(ui.visuals().error_fg_color, "Suite error");
+                }
+            }
+        });
+        if view.result.outcome != Outcome::Complete {
+            ui.colored_label(warning(ui), view.result.outcome.to_string());
+            ui.weak("Automatic tests skipped for an incomplete response.");
+        }
+        let current = &self.drafts[self.selected];
+        if view.result.summary.revision != current.revision {
+            ui.colored_label(warning(ui), "Response from previous draft");
+        }
+        if view.result.summary.environment != self.envs[self.env_index].name {
+            ui.colored_label(
+                warning(ui),
+                format!("Response from {}", view.result.summary.environment),
+            );
+        }
+        if self.active.as_ref().is_some_and(|(r, _, _)| r == &id) {
+            ui.weak(if self.active_testing {
+                "Tests running…"
+            } else {
+                "Previous response — sending a new request…"
+            });
+        }
+        if matches!(view.result.status, Some(401 | 403))
+            && current.request.auth.bearer.is_some()
+            && ui.button("Replace token").clicked()
+        {
+            self.request_tab = RequestTab::Auth;
+        }
+        ui.horizontal(|ui| {
+            for (tab, label) in [
+                (ResponseTab::Body, "Body"),
+                (ResponseTab::Headers, "Headers"),
+                (ResponseTab::Tests, "Test results"),
+                (ResponseTab::Details, "Request details"),
+            ] {
+                ui.selectable_value(&mut self.response_tab, tab, label);
+            }
+        });
+        ui.separator();
+        let mut page = None;
+        let mut save = None;
+        let mut location = None;
+        match self.response_tab {
+            ResponseTab::Body => {
+                let shown = if self.pretty {
+                    view.pretty.as_ref().unwrap_or(&view.preview)
+                } else {
+                    &view.preview
+                };
+                let found = editor::hits(shown, &self.response_find.query);
+                let mut reveal = None;
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(view.pretty.is_some(), |ui| {
+                        ui.selectable_value(&mut self.pretty, true, "Pretty");
+                        ui.selectable_value(&mut self.pretty, false, "Raw");
+                    });
+                    if editor::find_bar(ui, "response-find", &mut self.response_find, found.len()) {
+                        reveal = found
+                            .get(self.response_find.index)
+                            .map(|hit| hit.chars.clone());
+                    }
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(
+                            if self.pretty {
+                                view.pretty.as_ref().unwrap_or(&view.preview)
+                            } else {
+                                &view.preview
+                            }
+                            .clone(),
+                        );
+                    }
+                    if ui
+                        .button(if view.result.outcome == Outcome::Complete {
+                            "Save body…"
+                        } else {
+                            "Save partial body…"
+                        })
+                        .clicked()
+                    {
+                        save = Some(view.result.body.clone());
+                    }
+                });
+                if view.result.body.len() > MIB {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.weak(format!(
+                            "Showing bytes {}–{} of {}",
+                            view.offset,
+                            (view.offset + MIB).min(view.result.body.len()),
+                            view.result.body.len()
+                        ));
+                        if ui
+                            .add_enabled(view.offset > 0, egui::Button::new("Previous page"))
+                            .clicked()
+                        {
+                            page = Some(view.offset.saturating_sub(MIB));
+                        }
+                        if ui
+                            .add_enabled(
+                                view.offset + MIB < view.result.body.len(),
+                                egui::Button::new("Next page"),
+                            )
+                            .clicked()
+                        {
+                            page = Some(view.offset + MIB);
+                        }
+                    });
+                }
+                if view.binary {
+                    ui.add_space(20.0);
+                    ui.label("Binary response");
+                    ui.weak("Save the body to inspect it in another application.");
+                } else {
+                    // Read-only: `&str` is an immutable `TextBuffer`, so the editor cannot edit it.
+                    // The id carries the request so each one keeps its own scroll position.
+                    editor::code(
+                        ui,
+                        &format!("response-text-{id}"),
+                        &mut shown.as_str(),
+                        4,
+                        &found,
+                        self.response_find.index,
+                        reveal,
+                    );
+                }
+            }
+            ResponseTab::Headers => {
+                egui::ScrollArea::both().show(ui, |ui| {
+                    egui::Grid::new("response-headers")
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (name, value) in &view.result.headers {
+                                ui.label(RichText::new(name).monospace());
+                                ui.add(egui::Label::new(value).selectable(true));
+                                if ui.small_button("Copy").clicked() {
+                                    ui.ctx().copy_text(format!("{name}: {value}"));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+            }
+            ResponseTab::Tests => {
+                ui.weak(format!(
+                    "Response revision {} · test revision {} · {}",
+                    view.result.summary.revision,
+                    view.test_revision,
+                    view.result.summary.environment
+                ));
+                if let Some(report) = &view.report {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if let Some(error) = &report.suite_error {
+                            ui.colored_label(ui.visuals().error_fg_color, error);
+                        }
+                        if report.tests.is_empty() && report.suite_error.is_none() {
+                            ui.weak("No tests defined");
+                        }
+                        for case in &report.tests {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(
+                                    if case.passed {
+                                        success(ui)
+                                    } else {
+                                        ui.visuals().error_fg_color
+                                    },
+                                    if case.passed { "PASS" } else { "FAIL" },
+                                );
+                                ui.label(&case.name);
+                                if !case.passed
+                                    && ui
+                                        .small_button(match case.line {
+                                            Some(line) => format!("Go to line {line}"),
+                                            None => "Go to code".into(),
+                                        })
+                                        .clicked()
+                                {
+                                    self.request_tab = RequestTab::Tests;
+                                    self.goto_line = case.line;
+                                }
+                            });
+                            if let Some(error) = &case.error {
+                                ui.add(
+                                    egui::Label::new(RichText::new(error).monospace())
+                                        .selectable(true),
+                                );
+                            }
+                            ui.separator();
+                        }
+                        if !report.console.is_empty() {
+                            ui.strong("Console");
+                            for line in &report.console {
+                                ui.monospace(line);
+                            }
+                        }
+                    });
+                } else {
+                    ui.weak("No test results yet. Write assertions in the request's Tests tab.");
+                }
+            }
+            ResponseTab::Details => {
+                egui::ScrollArea::both().show(ui, |ui| {
+                    ui.weak("Effective request summary · Credentials masked");
+                    ui.monospace(format!(
+                        "{} {}",
+                        view.result.summary.method, view.result.summary.url
+                    ));
+                    ui.label(format!(
+                        "Environment: {} · Draft revision: {} · Timeout: {} ms",
+                        view.result.summary.environment,
+                        view.result.summary.revision,
+                        view.result.summary.timeout_ms
+                    ));
+                    ui.label(format!(
+                        "{} received encoded bytes · {} decoded bytes",
+                        view.result.encoded_bytes,
+                        view.result.body.len()
+                    ));
+                    for (n, v) in &view.result.summary.headers {
+                        ui.monospace(format!("{n}: {v}"));
+                    }
+                    if view.result.status.is_some_and(|s| (300..400).contains(&s))
+                        && let Some((_, value)) = view
+                            .result
+                            .headers
+                            .iter()
+                            .find(|(n, _)| n.eq_ignore_ascii_case("location"))
+                    {
+                        ui.label(format!("Location: {value}"));
+                        if ui.button("Open Location as request").clicked() {
+                            location = Some((view.result.summary.url.clone(), value.clone()));
+                        }
+                    }
+                });
+            }
+        }
+        if let Some(offset) = page {
+            let run_id = view.result.run_id.clone();
+            let body = view.result.body.clone();
+            self.preview(id, run_id, body, offset);
+        }
+        if let Some(body) = save
+            && let Some(path) = rfd::FileDialog::new()
+                .set_file_name("response.bin")
+                .save_file()
+        {
+            self.background(move || {
+                IoEvent::Message(
+                    body.save(&path)
+                        .map(|_| format!("Saved body to {}", path.display()))
+                        .map_err(Into::into),
+                )
+            });
+        }
+        if let Some((base, value)) = location {
+            match url_join(&base, &value) {
+                Ok(url) => {
+                    self.new_request();
+                    self.drafts[self.selected].request.set_address(&url);
+                    self.drafts[self.selected].request.name = "Redirect location".into();
+                    self.touch();
+                }
+                Err(e) => self.status = e,
+            }
+        }
+    }
+}
+fn url_join(base: &str, value: &str) -> Result<String, String> {
+    duckie_model::resolve_location(base, value)
+}
+fn size(n: u64) -> String {
+    if n >= MIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else if n >= 1024 {
+        format!("{:.1} KiB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+fn secret_input(
+    ui: &mut egui::Ui,
+    env: &str,
+    key: &str,
+    secrets: &mut std::collections::BTreeMap<String, Values>,
+    remember: &mut std::collections::BTreeSet<(String, String)>,
+    reveal: &mut bool,
+) -> bool {
+    let mut changed = false;
+    ui.push_id((env, key), |ui| {
+        let value = secrets
+            .entry(env.into())
+            .or_default()
+            .entry(key.into())
+            .or_default();
+        ui.horizontal(|ui| {
+            ui.label("Value");
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(value)
+                        .password(!*reveal)
+                        .desired_width(430.0)
+                        .hint_text("Paste credential"),
+                )
+                .changed();
+            ui.checkbox(reveal, "Show");
+        });
+        if value.is_empty() {
+            ui.colored_label(warning(ui), format!("No value for {key} in {env}"));
+        }
+        let pair = (env.into(), key.into());
+        let mut save = remember.contains(&pair);
+        if ui.checkbox(&mut save, "Remember in secrets file").changed() {
+            if save {
+                remember.insert(pair);
+            } else {
+                remember.remove(&pair);
+            }
+            changed = true;
+        }
+        ui.weak(if save {
+            "Source: .duckie/secrets.json (written on Save)"
+        } else {
+            "Source: this session"
+        });
+    });
+    changed
+}
+impl eframe::App for Duckie {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.poll();
+        if !self.io_busy && self.pending.is_none() && self.import.is_none() && !self.env_dialog {
+            self.shortcuts(&ctx);
+        }
+        if self.pending.is_some()
+            || self.delete.is_some()
+            || self.env_dialog
+            || self.import.is_some()
+            || self.about
+        {
+            ui.disable();
+        }
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.allow_close
+            && (self.dirty() || self.io_busy || self.active.is_some())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.active.is_some() {
+                if let Some((_, token, _)) = &self.active {
+                    token.cancel();
+                }
+                self.status = "Stopping active run. Close again when it finishes.".into();
+            } else if !self.io_busy {
+                self.pending = Some(Pending::Close);
+            }
+        }
+        egui::Panel::top("menu").show(ui, |ui| {
+            ui.add_enabled_ui(!self.io_busy, |ui| self.top_menu(ui));
+        });
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(if self.dirty() {
+                        "Unsaved changes"
+                    } else {
+                        "All changes saved"
+                    })
+                    .size(12.0),
+                );
+                ui.separator();
+                ui.add(egui::Label::new(RichText::new(&self.status).size(12.0)).truncate());
+            });
+        });
+        if let Some((id, _, started)) = &self.active {
+            let name = self
+                .drafts
+                .iter()
+                .find(|d| &d.request.id == id)
+                .map(|d| d.request.name.clone())
+                .unwrap_or_default();
+            let elapsed = started.elapsed().as_secs_f32();
+            egui::Panel::top("active-run").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} · {name} · {elapsed:.1}s",
+                        if self.active_testing {
+                            "Testing"
+                        } else {
+                            "Sending"
+                        }
+                    ));
+                    if ui
+                        .small_button(if self.active_testing {
+                            "Stop tests"
+                        } else {
+                            "Cancel"
+                        })
+                        .clicked()
+                        && let Some((_, token, _)) = &self.active
+                    {
+                        token.cancel();
+                    }
+                });
+            });
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if self.prefs.sidebar && ui.available_width() > 1000.0 {
+            egui::Panel::left("sidebar")
+                .default_size(240.0)
+                .size_range(190.0..=350.0)
+                .resizable(true)
+                .show(ui, |ui| {
+                    ui.add_enabled_ui(!self.io_busy, |ui| self.sidebar(ui));
+                });
+        }
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::Panel::top("request-pane")
+                .resizable(true)
+                .default_size(330.0)
+                .min_size(220.0)
+                .max_size((ui.available_height() - 170.0).max(220.0))
+                .show(ui, |ui| {
+                    ui.add_enabled_ui(!self.io_busy, |ui| {
+                        ui.push_id(self.drafts[self.selected].request.id.clone(), |ui| {
+                            self.request_header(ui);
+                            egui::ScrollArea::vertical()
+                                .id_salt("request-editor")
+                                .show(ui, |ui| {
+                                    self.editor(ui);
+                                });
+                        });
+                    });
+                });
+            egui::CentralPanel::default().show(ui, |ui| self.response(ui));
+        });
+        self.dialogs(&ctx);
+        #[cfg(feature = "screenshot")]
+        if let Ok(path) = std::env::var("DUCKIE_CAPTURE_PATH") {
+            self.capture_frames += 1;
+            if self.capture_frames == 4 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            }
+            ctx.input(|input| {
+                for event in &input.events {
+                    if let egui::Event::Screenshot { image, .. } = event {
+                        let rgba: Vec<u8> = image
+                            .pixels
+                            .iter()
+                            .flat_map(|pixel| pixel.to_array())
+                            .collect();
+                        image::save_buffer(
+                            &path,
+                            &rgba,
+                            image.width() as u32,
+                            image.height() as u32,
+                            image::ColorType::Rgba8,
+                        )
+                        .expect("Cannot save development screenshot");
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            });
+            self.allow_close = true;
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, "duckie-preferences", &self.prefs);
+    }
+    fn persist_egui_memory(&self) -> bool {
+        false
+    } // Text editor undo stacks can contain credentials.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some((_, token, _)) = &self.active {
+            token.cancel();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::App;
+    #[test]
+    fn native_ui_paths_render_and_edits_remain_scoped() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = Duckie::new(&cc);
+        let mut frame = eframe::Frame::_new_kittest();
+        app.drafts[0].request.url = "http://localhost:8080".into();
+        app.drafts[0].request.auth.bearer = Some(SecretBinding {
+            secret: "token".into(),
+        });
+        app.secrets.insert(
+            "dev".into(),
+            Values::from([("token".into(), "session-token".into())]),
+        );
+        app.envs.push(Environment {
+            name: "staging".into(),
+            ..Default::default()
+        });
+        app.env_index = 1;
+        assert!(app.snapshot().secrets.is_empty());
+        app.env_index = 0;
+        for width in [900.0, 1280.0] {
+            for tab in [
+                RequestTab::Params,
+                RequestTab::Headers,
+                RequestTab::Auth,
+                RequestTab::Body,
+                RequestTab::Tests,
+                RequestTab::Settings,
+            ] {
+                app.request_tab = tab;
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 820.0),
+                    )),
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+                assert!(!output.shapes.is_empty());
+                output.textures_delta.clear();
+            }
+        }
+        app.touch();
+        let id = app.drafts[0].request.id.clone();
+        app.new_request();
+        assert_ne!(id, app.drafts[1].request.id);
+        assert!(app.drafts[0].dirty);
+        assert!(app.responses.is_empty());
+        assert!(!app.service.busy());
+    }
+    /// Renders every response tab with a live find query and a pending Go-to-line, so the
+    /// highlighting layouter, the gutter painter and the reveal path all execute.
+    #[test]
+    fn find_and_go_to_line_render_over_a_response() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = Duckie::new(&cc);
+        let mut frame = eframe::Frame::_new_kittest();
+        let id = app.drafts[0].request.id.clone();
+        app.drafts[0].source = "test('a', () => {\n  expect(1).toBe(2);\n});\n".into();
+        app.responses.insert(
+            id.clone(),
+            ResponseView {
+                result: ExecutionResult {
+                    request_id: id.clone(),
+                    run_id: "run".into(),
+                    summary: RequestSummary {
+                        method: "GET".into(),
+                        url: "http://localhost/".into(),
+                        headers: vec![],
+                        environment: "dev".into(),
+                        revision: 0,
+                        timeout_ms: 30_000,
+                    },
+                    outcome: Outcome::Complete,
+                    status: Some(200),
+                    status_text: "OK".into(),
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: BodyHandle::Memory(std::sync::Arc::new(
+                        br#"{"duck":1,"duck2":2}"#.to_vec(),
+                    )),
+                    encoded_bytes: 20,
+                    duration_ms: 4,
+                },
+                preview: "{\"duck\":1,\n\"duck2\":2}".into(),
+                pretty: None,
+                binary: false,
+                offset: 0,
+                report: Some(TestReport {
+                    tests: vec![TestCase {
+                        name: "a".into(),
+                        passed: false,
+                        error: Some("Assertion failed (toBe)".into()),
+                        line: Some(2),
+                    }],
+                    ..Default::default()
+                }),
+                test_revision: 0,
+                environment: Values::new(),
+                viewed: 0,
+            },
+        );
+        app.response_find.query = "duck".into();
+        app.response_find.index = 1;
+        app.editor_find.query = "expect".into();
+        app.editor_find.open = true;
+        app.goto_line = Some(2);
+        app.request_tab = RequestTab::Tests;
+        for tab in [
+            ResponseTab::Body,
+            ResponseTab::Headers,
+            ResponseTab::Tests,
+            ResponseTab::Details,
+        ] {
+            app.response_tab = tab;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 820.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+            assert!(!output.shapes.is_empty());
+            output.textures_delta.clear();
+        }
+        // The Tests editor consumes the pending line so a later frame does not fight the caret.
+        assert_eq!(app.goto_line, None);
+    }
+}

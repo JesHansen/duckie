@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace.dependencies]
+duckie-model = { path = "crates/duckie-model" }
+duckie-storage = { path = "crates/duckie-storage" }
+duckie-http = { path = "crates/duckie-http" }
+duckie-openapi = { path = "crates/duckie-openapi" }
+duckie-tests = { path = "crates/duckie-tests" }
+duckie-app = { path = "crates/duckie-app" }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+anyhow = "1.0"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "net"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+tempfile = "3.22"
+url = "2.5"
+reqwest = { version = "=0.13.5", default-features = false, features = ["native-tls", "http2", "system-proxy", "stream", "multipart", "form"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+

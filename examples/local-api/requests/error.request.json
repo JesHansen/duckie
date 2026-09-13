@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "error",
+  "name": "Expect a 500 response",
+  "folder": "Responses",
+  "method": "GET",
+  "url": "{{env.baseUrl}}/status/500",
+  "tests": { "enabled": true, "file": "tests/error.test.js" }
+}

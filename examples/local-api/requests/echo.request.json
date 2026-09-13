@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "echo",
+  "name": "Echo a request",
+  "folder": "Requests",
+  "method": "GET",
+  "url": "{{env.baseUrl}}/echo",
+  "query": [{ "enabled": true, "name": "message", "value": "Hello, Duckie" }],
+  "headers": [{ "enabled": true, "name": "Accept", "value": "application/json" }],
+  "tests": { "enabled": true, "file": "tests/echo.test.js" }
+}

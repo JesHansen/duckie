@@ -1,0 +1,50 @@
+{
+  "openapi": "3.1.2",
+  "info": { "title": "Duckie local API", "version": "1.0.0" },
+  "servers": [{ "url": "http://127.0.0.1:8787" }],
+  "paths": {
+    "/echo": {
+      "get": {
+        "summary": "Echo a request",
+        "operationId": "echo",
+        "tags": ["Requests"],
+        "parameters": [
+          { "name": "message", "in": "query", "example": "Hello, Duckie", "schema": { "type": "string" } },
+          { "name": "tags", "in": "query", "explode": true, "example": ["duck", "yellow"], "schema": { "type": "array", "items": { "type": "string" } } }
+        ],
+        "responses": { "200": { "description": "Echoed request" } }
+      },
+      "post": {
+        "summary": "Send JSON",
+        "tags": ["Requests"],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": { "welcome": { "value": { "message": "Hello from Duckie", "version": 1 } } }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Echoed body" } }
+      }
+    },
+    "/status/{code}": {
+      "get": {
+        "summary": "Inspect an error response",
+        "tags": ["Responses"],
+        "parameters": [{ "name": "code", "in": "path", "required": true, "example": 500, "schema": { "type": "integer" } }],
+        "responses": { "500": { "description": "Intentional error" } }
+      }
+    },
+    "/large": {
+      "get": {
+        "summary": "Receive compressed text",
+        "tags": ["Responses"],
+        "parameters": [
+          { "name": "bytes", "in": "query", "example": 4194304, "schema": { "type": "integer" } },
+          { "name": "gzip", "in": "query", "example": true, "schema": { "type": "boolean" } }
+        ],
+        "responses": { "200": { "description": "Compressible text" } }
+      }
+    }
+  }
+}
