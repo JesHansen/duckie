@@ -87,15 +87,28 @@ pub fn variables(ui: &mut egui::Ui, id: &str, values: &mut Values) -> bool {
 }
 /// Draws one of the request editors with the shared find bar above it, records whether the
 /// caret is inside it, and reveals either the current match or a pending Go-to-line.
+/// The shared state one of the request editors needs beyond its text.
+struct Editing<'a> {
+    find: &'a mut editor::Find,
+    /// Set when the caret is inside this editor, for next frame's Ctrl+F routing.
+    focused: &'a mut bool,
+    /// A one-based line to reveal, from a failed assertion.
+    goto: Option<u32>,
+    syntax: editor::Syntax,
+}
 fn request_code(
     ui: &mut egui::Ui,
     id: &str,
     text: &mut String,
     rows: usize,
-    find: &mut editor::Find,
-    focused: &mut bool,
-    goto: Option<u32>,
+    editing: Editing<'_>,
 ) -> bool {
+    let Editing {
+        find,
+        focused,
+        goto,
+        syntax,
+    } = editing;
     let found = editor::hits(text, &find.query);
     let mut reveal = None;
     if find.open {
@@ -111,7 +124,18 @@ fn request_code(
     if let Some(line) = goto {
         reveal = editor::line_range(text, line);
     }
-    let result = editor::code(ui, id, text, rows, &found, find.index, reveal);
+    let result = editor::code(
+        ui,
+        id,
+        text,
+        rows,
+        editor::Decoration {
+            found: &found,
+            current: find.index,
+            reveal,
+            syntax,
+        },
+    );
     *focused |= result.focused;
     result.changed
 }
@@ -782,9 +806,16 @@ impl Duckie {
                             "body-code",
                             text,
                             9,
-                            &mut self.editor_find,
-                            &mut self.editor_focused,
-                            None,
+                            Editing {
+                                find: &mut self.editor_find,
+                                focused: &mut self.editor_focused,
+                                goto: None,
+                                syntax: if is_json {
+                                    editor::Syntax::Json
+                                } else {
+                                    editor::Syntax::None
+                                },
+                            },
                         );
                         ui.weak("{{variables}} use literal substitution; inserted values are not automatically JSON-escaped.");
                     }
@@ -888,9 +919,12 @@ impl Duckie {
                     "test-code",
                     &mut d.source,
                     10,
-                    &mut self.editor_find,
-                    &mut self.editor_focused,
-                    goto,
+                    Editing {
+                        find: &mut self.editor_find,
+                        focused: &mut self.editor_focused,
+                        goto,
+                        syntax: editor::Syntax::JavaScript,
+                    },
                 );
                 ui.weak("JavaScript · 2 second limit · No network, filesystem, or Node.js API");
             }
@@ -1097,6 +1131,9 @@ impl Duckie {
                                 .map(|hit| hit.chars.clone());
                         }
                     }
+                    if shown.len() > editor::MAX_COLOURED {
+                        ui.weak("Plain above 64 KiB");
+                    }
                     if !self.response_find.query.is_empty() {
                         if !whole_body && view.result.body.len() > view.page {
                             // The pretty view cannot be mapped back to body offsets, so its count
@@ -1192,9 +1229,20 @@ impl Duckie {
                         &format!("response-text-{id}"),
                         &mut shown.as_str(),
                         4,
-                        &found,
-                        current,
-                        reveal,
+                        editor::Decoration {
+                            found: &found,
+                            current,
+                            reveal,
+                            // Colour only when the server said it is JSON; guessing from the bytes
+                            // would mis-colour plain text that merely starts with a brace.
+                            syntax: if view.result.headers.iter().any(|(name, value)| {
+                                name.eq_ignore_ascii_case("content-type") && value.contains("json")
+                            }) {
+                                editor::Syntax::Json
+                            } else {
+                                editor::Syntax::None
+                            },
+                        },
                     );
                 }
             }
@@ -1768,7 +1816,13 @@ mod tests {
             })
             .collect();
         let id = app.drafts[0].request.id.clone();
-        let body: String = std::iter::repeat_n("{\"duck\": 1},\n", 60_000).collect();
+        let lines: usize = std::env::var("DUCKIE_MEASURE_LINES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            // Just under the colouring cap by default, which is the worst case that still
+            // colours; a larger page draws plain and is cheaper.
+            .unwrap_or(5_000);
+        let body: String = std::iter::repeat_n("{\"duck\": 1},\n", lines).collect();
         app.responses.insert(
             id.clone(),
             ResponseView {
@@ -1786,7 +1840,9 @@ mod tests {
                     outcome: Outcome::Complete,
                     status: Some(200),
                     status_text: "OK".into(),
-                    headers: vec![],
+                    // Declared JSON, so the preview is syntax-coloured and the measurement covers
+                    // the scanner rather than only the plain path.
+                    headers: vec![("content-type".into(), "application/json".into())],
                     body: BodyHandle::Memory(std::sync::Arc::new(body.clone().into_bytes())),
                     encoded_bytes: body.len() as u64,
                     duration_ms: 1,
