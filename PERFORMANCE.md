@@ -100,7 +100,7 @@ wrapped cost 228.9 MiB against 213.7 MiB unwrapped.
 | Renderer | Sampled idle private memory | Result |
 | --- | ---: | --- |
 | wgpu | 374.3 MiB | Under revised ceiling; higher baseline |
-| glow / OpenGL | 146.3 MiB | Selected |
+| glow / OpenGL | 146.3 MiB | Selected; confirmed working in an Omnissa Horizon session |
 
 The glow sample was 153,415,680 private bytes and roughly 119.7 MiB working set, taken on an empty scratch workspace with no response or test worker. Raw samples are in `artifacts/idle-start.json`, `artifacts/idle-cpu-start.json` and `artifacts/idle-result.json`. These predate the day's editor, storage and import changes and have not been retaken.
 

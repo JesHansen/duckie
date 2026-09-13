@@ -7,7 +7,7 @@ After you have read all relevant files here in the repo root, you may continue a
 - Build Duckie v1 from ARCHITECTURE.md and UI_DESIGN.md.
 - The user explicitly relaxed the initial memory requirement: **keep v1 below 500 MB**. Treat 500,000,000 bytes as the conservative ceiling. The original 80 MiB proposal is no longer the v1 requirement.
 - The project is **MIT licensed** (decided 13 September 2026), copyright Jes Bak Hansen. Dependency licenses were reviewed then: all 254 linked crates are permissive, none copyleft.
-- **Gate 2 narrowed for a single-user tool** (decided 13 September 2026). Out of scope for v1: accessibility (Narrator, IME, keyboard-only walkthroughs), corporate root certificates, and enterprise proxies — the owner does not need them for planned use. The features stay in the build and are simply uncertified. Display scaling and remote desktop remain in scope: the owner works through the **Omnissa Horizon** client daily, which is the real test for the OpenGL renderer choice.
+- **Gate 2 narrowed for a single-user tool** (decided 13 September 2026). Out of scope for v1: accessibility (Narrator, IME, keyboard-only walkthroughs), corporate root certificates, and enterprise proxies — the owner does not need them for planned use. The features stay in the build and are simply uncertified. **Omnissa Horizon was tested on 13 September 2026 and works**, with startup subjectively comparable to local, so the OpenGL renderer choice holds in the environment the owner actually uses. Only display scaling remains open in gate 2.
 - Token economy is at a premium. Act as an orchestrator and make heavy use of sub agents for implementation, if this saves on token cost / leaves more of my 5h window usable. For regular implementation tasks, spawn a Sonnet agent, for harder tasks implement them yourself without delegating to a sub agent.
 
 ## Current state
@@ -29,7 +29,7 @@ After you have read all relevant files here in the repo root, you may continue a
 
 ## Next useful steps
 
-1. Continue the prioritized backlog in IMPLEMENTATION_STATUS.md. The largest untouched areas are the **performance gate** (item 1), **Windows display-scale and Omnissa Horizon validation** (item 2, now narrowed), and **lazy collection loading plus disk-change detection with a comparison UI** (item 5).
+1. Continue the prioritized backlog in IMPLEMENTATION_STATUS.md. The largest untouched areas are the **performance gate** (item 1), **Windows display-scale validation** (item 2, now nearly closed), and **lazy collection loading plus disk-change detection with a comparison UI** (item 5).
 2. Remaining editor polish: bracket pairing and incremental syntax colors, F6 region traversal, and **grouped/collapsible sidebar folders with user ordering**. The sidebar is a virtualized flat list (`show_rows`, uniform 38 px); grouping means flattening to a display list of header and request entries so virtualization survives, plus a collapsed-folder set in `Duckie`.
 3. Remaining OpenAPI work: relative and remote references, object parameters (`deepObject`, exploded `form` objects), `label`/`matrix` path styles, richer media handling and reimport diffs. Keep the existing rule — unsupported cases stay blocked rather than guessed.
 4. Re-measure memory and startup: the PERFORMANCE.md samples predate this session's changes.
