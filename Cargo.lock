@@ -876,6 +876,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "url",
  "windows-sys 0.61.2",
 ]
 
@@ -914,6 +915,7 @@ dependencies = [
  "anyhow",
  "duckie-model",
  "serde_json",
+ "url",
 ]
 
 [[package]]

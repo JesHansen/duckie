@@ -31,6 +31,8 @@ node scripts/dev-server.mjs
 
 Then open the `examples/local-api` collection in Duckie, or import `examples/openapi.json`. The server binds only to `127.0.0.1:8787`. It has echo, error-status, redirect, delayed, and compressed-response endpoints. The protected OpenAPI URL is `http://127.0.0.1:8787/protected/openapi.json`; its illustrative development token is `duckie-local-demo`.
 
+A spec split across files imports too. References to other documents are followed relative to the document holding them — sibling files for a file import, same-origin URLs for a URL import — and onward from those, up to 50 documents and 20 MiB. Cross-origin references are **not** fetched: the credentials you gave for the spec would travel with them. Anything not retrieved is reported and still blocks the request that needs it.
+
 `node scripts/make-fixtures.mjs` generates the fixtures the performance targets in [ARCHITECTURE.md](ARCHITECTURE.md#9-performance-acceptance-targets) call for: a 1,000-request collection, a 10,000-request stress collection, and a 10+ MiB OpenAPI document, all under `fixtures/` (gitignored). Output is deterministic, so re-running it for a benchmark pass produces byte-identical fixtures.
 
 ## Local files and secrets

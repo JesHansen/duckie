@@ -1,7 +1,101 @@
 use crate::{state::*, ui::variables};
+use anyhow::Context;
 use duckie_model::*;
+use duckie_openapi::{MAX_EXTERNAL_BYTES, MAX_EXTERNAL_DOCUMENTS, external_references};
 use duckie_storage::{Collection, SecretsFile, StoredRequest};
 use eframe::egui;
+use std::collections::BTreeMap;
+
+/// Follows `$ref`s to sibling files, and onward from those, until nothing new is referenced.
+/// Bounded by document count and total bytes so a spec cannot pull in an unbounded tree.
+fn acquire_local(
+    base: &str,
+    root: &serde_json::Value,
+) -> (BTreeMap<String, serde_json::Value>, Vec<String>) {
+    let mut fetched = BTreeMap::new();
+    let mut notes = vec![];
+    let mut budget = MAX_EXTERNAL_BYTES;
+    let mut pending = external_references(root, base);
+    while let Some(uri) = pending.pop() {
+        if fetched.contains_key(&uri) {
+            continue;
+        }
+        if fetched.len() >= MAX_EXTERNAL_DOCUMENTS {
+            notes.push(format!(
+                "Stopped after {MAX_EXTERNAL_DOCUMENTS} referenced documents"
+            ));
+            break;
+        }
+        match std::fs::read(&uri) {
+            Ok(bytes) if bytes.len() <= budget => match serde_json::from_slice(&bytes) {
+                Ok(document) => {
+                    budget -= bytes.len();
+                    // A fetched document's own references are relative to it, not to the root.
+                    pending.extend(external_references(&document, &uri));
+                    fetched.insert(uri, document);
+                }
+                Err(e) => notes.push(format!("{uri}: {e}")),
+            },
+            Ok(_) => notes.push(format!("{uri}: referenced documents exceed the size limit")),
+            Err(e) => notes.push(format!("{uri}: {e}")),
+        }
+    }
+    (fetched, notes)
+}
+/// The same, over HTTP. Credentials given for the spec are reused, so acquisition is restricted to
+/// the spec's own origin: sending the token to another host because a document asked would be a
+/// credential leak the user never agreed to.
+async fn acquire_remote(
+    http: &duckie_http::HttpEngine,
+    base: &str,
+    root: &serde_json::Value,
+    env: &EnvironmentSnapshot,
+    template: &RequestDefinition,
+) -> BTreeMap<String, serde_json::Value> {
+    let origin = url::Url::parse(base).ok().map(|u| u.origin());
+    let mut fetched = BTreeMap::new();
+    let mut budget = MAX_EXTERNAL_BYTES as u64;
+    let mut pending = external_references(root, base);
+    while let Some(uri) = pending.pop() {
+        if fetched.contains_key(&uri) || fetched.len() >= MAX_EXTERNAL_DOCUMENTS {
+            continue;
+        }
+        let Ok(target) = url::Url::parse(&uri) else {
+            continue;
+        };
+        if Some(target.origin()) != origin {
+            continue;
+        }
+        let request = RequestDefinition {
+            url: uri.clone(),
+            auth: template.auth.clone(),
+            encoded_limit: budget.max(1),
+            decoded_limit: budget.max(1),
+            ..Default::default()
+        };
+        let Ok(prepared) = prepare(&request, env, &RunBindings::default(), 0) else {
+            continue;
+        };
+        let token = tokio_util::sync::CancellationToken::new();
+        let Ok(response) = http.execute(prepared, token).await else {
+            continue;
+        };
+        if response.outcome != Outcome::Complete
+            || !response.status.is_some_and(|s| (200..300).contains(&s))
+        {
+            continue;
+        }
+        let Ok(bytes) = response.body.read(0, budget) else {
+            continue;
+        };
+        if let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            budget = budget.saturating_sub(bytes.len() as u64);
+            pending.extend(external_references(&document, &uri));
+            fetched.insert(uri, document);
+        }
+    }
+    fetched
+}
 
 impl Duckie {
     pub fn dialogs(&mut self, ctx: &egui::Context) {
@@ -220,6 +314,7 @@ impl Duckie {
                             });
                             env.secrets.insert("importKey".into(), api_value);
                         }
+                        let base = request.url.clone();
                         let prepared = prepare(&request, &env, &RunBindings::default(), 0)?;
                         let response = http.execute(prepared, cancel).await?;
                         if response.outcome != Outcome::Complete {
@@ -232,9 +327,16 @@ impl Duckie {
                                 response.status_text
                             );
                         }
+                        let bytes = response.body.read(0, 20 * MIB)?;
+                        let mut root: serde_json::Value = serde_json::from_slice(&bytes)
+                            .context("OpenAPI source must be valid JSON")?;
+                        let fetched = acquire_remote(&http, &base, &root, &env, &request).await;
+                        let notes = duckie_openapi::inline_external(&mut root, &base, &fetched);
                         tokio::task::spawn_blocking(move || {
-                            let bytes = response.body.read(0, 20 * MIB)?;
-                            duckie_openapi::import_json(&bytes)
+                            duckie_openapi::import_value(root).map(|mut draft| {
+                                draft.diagnostics.extend(notes);
+                                draft
+                            })
                         })
                         .await?
                     }
@@ -249,7 +351,16 @@ impl Duckie {
                         if std::fs::metadata(&path)?.len() > 20 * MIB {
                             anyhow::bail!("OpenAPI file exceeds 20 MiB");
                         }
-                        duckie_openapi::import_json(&std::fs::read(path)?)
+                        let base = path.to_string_lossy().replace('\\', "/");
+                        let mut root: serde_json::Value =
+                            serde_json::from_slice(&std::fs::read(&path)?)
+                                .context("OpenAPI source must be valid JSON")?;
+                        let (fetched, mut notes) = acquire_local(&base, &root);
+                        notes.extend(duckie_openapi::inline_external(&mut root, &base, &fetched));
+                        duckie_openapi::import_value(root).map(|mut draft| {
+                            draft.diagnostics.extend(notes);
+                            draft
+                        })
                     })())
                 });
             }

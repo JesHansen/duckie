@@ -2,6 +2,7 @@
 use anyhow::{Context, Result, bail};
 use duckie_model::*;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 pub struct ImportDraft {
     pub name: String,
@@ -20,13 +21,133 @@ pub struct Operation {
     pub auth_index: usize,
 }
 
+/// Where fetched external documents are embedded before resolution. Keeping them inside the
+/// root means the resolver below only ever deals with internal pointers.
+pub const EXTERNAL: &str = "x-duckie-external";
+/// Aggregate ceilings on reference acquisition, so one import cannot walk a whole server.
+pub const MAX_EXTERNAL_DOCUMENTS: usize = 50;
+pub const MAX_EXTERNAL_BYTES: usize = 20 * MIB as usize;
+
+/// Splits a `$ref` into its document part and its JSON pointer.
+fn split_ref(reference: &str) -> (&str, &str) {
+    match reference.split_once('#') {
+        Some((document, pointer)) => (document, pointer),
+        None => (reference, ""),
+    }
+}
+/// Resolves a reference's document part against the document that contains it. Absolute URLs win,
+/// otherwise the reference is relative to its own document, as JSON Reference requires.
+pub fn join_ref(base: &str, document: &str) -> String {
+    if document.is_empty() {
+        return base.to_owned();
+    }
+    if let Some(absolute) = as_url(document) {
+        return absolute.into();
+    }
+    if let Some(base) = as_url(base)
+        && let Ok(joined) = base.join(document)
+    {
+        return joined.into();
+    }
+    let parent = base.rsplit_once(['/', '\\']).map_or("", |(head, _)| head);
+    if parent.is_empty() {
+        document.to_owned()
+    } else {
+        format!("{parent}/{document}")
+    }
+}
+/// `Url::parse` reads a Windows drive letter as a one-character scheme, turning `C:/specs/api.json`
+/// into a URL and lower-casing it. Require a longer scheme so local paths stay paths.
+fn as_url(text: &str) -> Option<url::Url> {
+    url::Url::parse(text)
+        .ok()
+        .filter(|parsed| parsed.scheme().len() > 1)
+}
+fn walk_refs(value: &mut Value, visit: &mut impl FnMut(&str) -> Option<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(reference)) = map.get("$ref")
+                && let Some(replacement) = visit(reference)
+            {
+                map.insert("$ref".into(), Value::String(replacement));
+            }
+            for (_, child) in map.iter_mut() {
+                walk_refs(child, visit);
+            }
+        }
+        Value::Array(list) => list.iter_mut().for_each(|child| walk_refs(child, visit)),
+        _ => {}
+    }
+}
+/// Document URIs referenced from `root`, resolved against `base`. Purely internal references are
+/// already resolvable and are not reported.
+pub fn external_references(root: &Value, base: &str) -> Vec<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let mut copy = root.clone();
+    walk_refs(&mut copy, &mut |reference| {
+        let (document, _) = split_ref(reference);
+        if !document.is_empty() {
+            found.insert(join_ref(base, document));
+        }
+        None
+    });
+    found.into_iter().collect()
+}
+/// Embeds `fetched` under `EXTERNAL` and rewrites every reference — in the root and inside each
+/// embedded document — into an internal pointer. A document's own `#/...` references have to be
+/// rebased too, or they would silently address the root's components after embedding.
+///
+/// Returns a diagnostic for each reference left unresolved; those still fail at use, by design.
+pub fn inline_external(
+    root: &mut Value,
+    base: &str,
+    fetched: &BTreeMap<String, Value>,
+) -> Vec<String> {
+    let keys: BTreeMap<&String, String> = fetched
+        .keys()
+        .enumerate()
+        .map(|(i, uri)| (uri, format!("d{i}")))
+        .collect();
+    let mut diagnostics = vec![];
+    let mut rewrite = |value: &mut Value, document_base: &str, prefix: &str| {
+        walk_refs(value, &mut |reference| {
+            let (document, pointer) = split_ref(reference);
+            if document.is_empty() {
+                // Internal to its own document: only an embedded one needs rebasing.
+                return (!prefix.is_empty()).then(|| format!("#{prefix}{pointer}"));
+            }
+            let uri = join_ref(document_base, document);
+            match keys.get(&uri) {
+                Some(key) => Some(format!("#/{EXTERNAL}/{key}{pointer}")),
+                None => {
+                    diagnostics.push(format!("Reference not retrieved: {reference}"));
+                    None
+                }
+            }
+        });
+    };
+    let mut slot = serde_json::Map::new();
+    for (uri, document) in fetched {
+        let key = &keys[uri];
+        let mut copy = document.clone();
+        rewrite(&mut copy, uri, &format!("/{EXTERNAL}/{key}"));
+        slot.insert(key.clone(), copy);
+    }
+    rewrite(root, base, "");
+    if !slot.is_empty() {
+        root[EXTERNAL] = Value::Object(slot);
+    }
+    diagnostics.sort();
+    diagnostics.dedup();
+    diagnostics
+}
 fn resolve<'a>(root: &'a Value, value: &'a Value, chain: &mut Vec<String>) -> Result<&'a Value> {
     if chain.len() >= 32 {
         bail!("Reference depth exceeds 32");
     }
     if let Some(reference) = value["$ref"].as_str() {
         if !reference.starts_with('#') {
-            bail!("External reference needs resolution before Send: {reference}");
+            bail!("External reference was not retrieved: {reference}");
         }
         if chain.iter().any(|r| r == reference) {
             bail!("Reference cycle: {} -> {reference}", chain.join(" -> "));
@@ -183,7 +304,9 @@ pub fn import_json(bytes: &[u8]) -> Result<ImportDraft> {
     if bytes.len() > 20 * MIB as usize {
         bail!("OpenAPI document exceeds 20 MiB");
     }
-    let root: Value = serde_json::from_slice(bytes).context("OpenAPI source must be valid JSON")?;
+    import_value(serde_json::from_slice(bytes).context("OpenAPI source must be valid JSON")?)
+}
+pub fn import_value(root: Value) -> Result<ImportDraft> {
     let version = root["openapi"]
         .as_str()
         .context("Missing OpenAPI version (Swagger 2 is unsupported)")?
@@ -758,6 +881,73 @@ mod tests {
         let root = json!({"openapi":"3.1.0","paths":{"/":{"post":{"requestBody":{"content":{"application/json":{"schema":{"anyOf":[{"type":"object"}]}}}}}}}});
         let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
         assert!(draft.operations[0].finish().blockers.is_empty());
+    }
+    #[test]
+    fn references_resolve_relative_to_the_document_that_holds_them() {
+        assert_eq!(
+            join_ref("https://api.test/v1/api.json", "common.json"),
+            "https://api.test/v1/common.json"
+        );
+        assert_eq!(
+            join_ref("https://api.test/v1/api.json", "../shared/c.json"),
+            "https://api.test/shared/c.json"
+        );
+        assert_eq!(
+            join_ref("https://api.test/v1/api.json", "https://other.test/x.json"),
+            "https://other.test/x.json"
+        );
+        assert_eq!(
+            join_ref("C:/specs/api.json", "schemas/user.json"),
+            "C:/specs/schemas/user.json"
+        );
+        assert_eq!(join_ref("C:/specs/api.json", ""), "C:/specs/api.json");
+    }
+    #[test]
+    fn external_documents_are_embedded_and_every_reference_rebased() {
+        let base = "https://api.test/v1/api.json";
+        let mut root = json!({"paths":{"/":{"get":{"parameters":[{"$ref":"common.json#/components/parameters/Page"}]}}}});
+        assert_eq!(
+            external_references(&root, base),
+            vec!["https://api.test/v1/common.json".to_string()]
+        );
+        // common.json refers to its own components, and on to a third document.
+        let fetched = BTreeMap::from([
+            (
+                "https://api.test/v1/common.json".to_string(),
+                json!({"components":{"parameters":{"Page":{"name":"page","in":"query","schema":{"$ref":"#/components/schemas/Int"}}},"schemas":{"Int":{"$ref":"../shared/types.json#/Int"}}}}),
+            ),
+            (
+                "https://api.test/shared/types.json".to_string(),
+                json!({"Int":{"type":"integer","example":7}}),
+            ),
+        ]);
+        assert!(inline_external(&mut root, base, &fetched).is_empty());
+
+        // The root reference now points into the embedded copy...
+        let reference = root["paths"]["/"]["get"]["parameters"][0]["$ref"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reference.starts_with(&format!("#/{EXTERNAL}/")),
+            "{reference}"
+        );
+        // ...and the embedded document's own "#/..." reference was rebased inside it, rather than
+        // silently addressing the root's components.
+        let page = deref(&root, &root["paths"]["/"]["get"]["parameters"][0]).unwrap();
+        assert_eq!(page["name"], "page");
+        let schema = page["schema"]["$ref"].as_str().unwrap();
+        assert!(schema.contains(EXTERNAL), "{schema}");
+        // Following that chain reaches the third document, two hops from the root.
+        let resolved = deref(&root, &page["schema"]).unwrap();
+        assert_eq!(resolved["example"], 7, "root -> common.json -> types.json");
+    }
+    #[test]
+    fn a_document_that_was_not_retrieved_is_reported_and_still_fails_at_use() {
+        let mut root = json!({"a":{"$ref":"missing.json#/X"}});
+        let diagnostics = inline_external(&mut root, "C:/specs/api.json", &BTreeMap::new());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("missing.json"), "{diagnostics:?}");
+        assert!(deref(&root, &root["a"]).is_err());
     }
     #[test]
     fn unsupported_serialization_blocks_send() {

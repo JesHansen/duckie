@@ -23,6 +23,7 @@ duckie-app.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+url.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 eframe = { version = "=0.36.2", default-features = false, features = ["glow", "accesskit", "default_fonts", "persistence"] }
