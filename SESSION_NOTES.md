@@ -7,6 +7,7 @@ After you have read all relevant files here in the repo root, you may continue a
 - Build Duckie v1 from ARCHITECTURE.md and UI_DESIGN.md.
 - The user explicitly relaxed the initial memory requirement: **keep v1 below 500 MB**. Treat 500,000,000 bytes as the conservative ceiling. The original 80 MiB proposal is no longer the v1 requirement.
 - The project is **MIT licensed** (decided 13 September 2026), copyright Jes Bak Hansen. Dependency licenses were reviewed then: all 254 linked crates are permissive, none copyleft.
+- **Accessibility is out of scope for v1** (decided 13 September 2026): Duckie is a single-user tool for the owner, with no accessibility requirement. AccessKit stays enabled, but Narrator and IME validation are not gates.
 - Token economy is at a premium. Act as an orchestrator and make heavy use of sub agents for implementation, if this saves on token cost / leaves more of my 5h window usable. For regular implementation tasks, spawn a Sonnet agent, for harder tasks implement them yourself without delegating to a sub agent.
 
 ## Current state

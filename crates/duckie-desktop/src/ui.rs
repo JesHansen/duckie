@@ -958,7 +958,7 @@ impl Duckie {
                             .map(|hit| hit.chars.clone());
                     }
                     // Find sees only the loaded page, so say so rather than implying a whole-body count.
-                    if !self.response_find.query.is_empty() && view.result.body.len() > MIB {
+                    if !self.response_find.query.is_empty() && view.result.body.len() > view.page {
                         ui.weak("on this page");
                     }
                     if ui.button("Copy").clicked() {
@@ -982,28 +982,31 @@ impl Duckie {
                         save = Some(view.result.body.clone());
                     }
                 });
-                if view.result.body.len() > MIB {
+                // Page size is chosen per response, so paging must follow it rather than
+                // assume the maximum; see `page_size`.
+                let step = view.page.max(1);
+                if view.result.body.len() > step {
                     ui.horizontal_wrapped(|ui| {
                         ui.weak(format!(
                             "Showing bytes {}–{} of {}",
                             view.offset,
-                            (view.offset + MIB).min(view.result.body.len()),
+                            (view.offset + step).min(view.result.body.len()),
                             view.result.body.len()
                         ));
                         if ui
                             .add_enabled(view.offset > 0, egui::Button::new("Previous page"))
                             .clicked()
                         {
-                            page = Some(view.offset.saturating_sub(MIB));
+                            page = Some(view.offset.saturating_sub(step));
                         }
                         if ui
                             .add_enabled(
-                                view.offset + MIB < view.result.body.len(),
+                                view.offset + step < view.result.body.len(),
                                 egui::Button::new("Next page"),
                             )
                             .clicked()
                         {
-                            page = Some(view.offset + MIB);
+                            page = Some(view.offset + step);
                         }
                     });
                 }
@@ -1438,6 +1441,29 @@ mod tests {
         assert!(app.responses.is_empty());
         assert!(!app.service.busy());
     }
+    #[test]
+    fn page_size_shrinks_only_for_very_long_lines() {
+        let wrapped: Vec<u8> = "x".repeat(79).into_bytes();
+        let mut multiline = vec![];
+        for _ in 0..40_000 {
+            multiline.extend_from_slice(&wrapped);
+            multiline.push(b'\n');
+        }
+        assert_eq!(
+            page_size(&multiline),
+            MIB,
+            "readable lines keep the full page"
+        );
+        assert_eq!(page_size(b"short\nlines\n"), MIB);
+        assert_eq!(page_size(&[]), MIB);
+        // One unbroken line is the minified-JSON case that blew the memory budget.
+        let minified = vec![b'x'; 200 * 1024];
+        assert!(page_size(&minified) < MIB);
+        // A single long line anywhere is enough, even among short ones.
+        let mut mixed = b"short\n".to_vec();
+        mixed.extend(std::iter::repeat_n(b'x', 8 * 1024));
+        assert!(page_size(&mixed) < MIB);
+    }
     /// Renders every response tab with a live find query and a pending Go-to-line, so the
     /// highlighting layouter, the gutter painter and the reveal path all execute.
     #[test]
@@ -1476,6 +1502,8 @@ mod tests {
                 pretty: None,
                 binary: false,
                 offset: 0,
+                // Smaller than the body, so the paging controls render too.
+                page: 8,
                 report: Some(TestReport {
                     tests: vec![TestCase {
                         name: "a".into(),

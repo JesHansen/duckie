@@ -11,6 +11,22 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Bytes of a response body to show at once.
+///
+/// Laying text out costs roughly 200 bytes of glyph and mesh data per character regardless of
+/// how it is wrapped, so a page of minified JSON — one line of a million characters — cost over
+/// 200 MiB against a 32 MiB budget. Line structure does not change that; only the number of
+/// characters handed to the widget does. A body whose lines are short enough to be read normally
+/// keeps the full page; anything with very long lines pages in smaller steps instead.
+pub fn page_size(bytes: &[u8]) -> u64 {
+    const LONG_LINE: usize = 4 * 1024;
+    let longest = bytes
+        .split(|b| *b == b'\n')
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or(0);
+    if longest > LONG_LINE { 128 * 1024 } else { MIB }
+}
 pub const EXAMPLE: &str = "test(\"returns a successful JSON response\", () => {\n  expect(response.status).toBe(200);\n  expect(response.header(\"content-type\")).toContain(\"application/json\");\n  expect(response.json()).toBeType(\"object\");\n});\n";
 #[derive(PartialEq, Clone, Copy)]
 pub enum RequestTab {
@@ -42,6 +58,8 @@ pub struct ResponseView {
     pub pretty: Option<String>,
     pub binary: bool,
     pub offset: u64,
+    /// Bytes shown per page. Shrinks for very long lines; see `page_size`.
+    pub page: u64,
     pub report: Option<TestReport>,
     pub test_revision: u64,
     pub environment: Values,
@@ -55,7 +73,7 @@ pub enum IoEvent {
         id: String,
         run_id: String,
         offset: u64,
-        result: Result<(String, Option<String>, bool)>,
+        result: Result<(String, Option<String>, bool, u64)>,
     },
     Message(Result<String>),
     Secrets(Result<SecretsFile>),
@@ -384,7 +402,6 @@ impl Duckie {
             result: (|| {
                 let bytes = body.read(offset, MIB)?;
                 let binary = bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
-                let text = String::from_utf8_lossy(&bytes).into_owned();
                 let pretty = if offset == 0 && body.len() <= MIB {
                     serde_json::from_slice::<serde_json::Value>(&bytes)
                         .ok()
@@ -392,7 +409,14 @@ impl Duckie {
                 } else {
                     None
                 };
-                Ok((text, pretty, binary))
+                let page = page_size(&bytes);
+                let shown = &bytes[..(page as usize).min(bytes.len())];
+                Ok((
+                    String::from_utf8_lossy(shown).into_owned(),
+                    pretty,
+                    binary,
+                    page,
+                ))
             })(),
         });
     }
@@ -426,6 +450,7 @@ impl Duckie {
                             pretty: None,
                             binary: false,
                             offset: 0,
+                            page: MIB,
                             report: None,
                             environment: self.active_environment.clone(),
                             viewed: self.clock,
@@ -515,11 +540,12 @@ impl Duckie {
                         && view.result.run_id == run_id
                     {
                         match result {
-                            Ok((text, pretty, binary)) => {
+                            Ok((text, pretty, binary, page)) => {
                                 view.preview = text;
                                 view.pretty = pretty;
                                 view.binary = binary;
                                 view.offset = offset;
+                                view.page = page;
                             }
                             Err(e) => view.preview = format!("Preview unavailable: {e}"),
                         }

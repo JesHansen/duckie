@@ -17,7 +17,7 @@ Keep `duckie-test-worker.exe` beside `duckie.exe`. Building only the desktop cra
 
 On first launch, paste an HTTP(S) URL and press **Ctrl+Enter**. Auth supports a bearer token, a header API key, or both. Change request tabs to edit parameters, headers, body, tests, and transport settings. **Ctrl+S saves the whole collection**, including its dirty drafts and local environment changes. Sending never saves automatically.
 
-The body, test and response-body views are monospace editors with a line-number gutter. They do not wrap; long lines scroll sideways under the gutter. **Ctrl+F** opens find for whichever editor holds the caret, and otherwise for the response body. Enter and Shift+Enter step forward and back through matches, the current match is highlighted more strongly than the rest, and the counter reads `3 of 12`. Matching is case-sensitive and stops counting after 5,000 hits on one preview page.
+The body, test and response-body views are monospace editors with a line-number gutter. They do not wrap; long lines scroll sideways under the gutter. **Ctrl+F** opens find for whichever editor holds the caret, and otherwise for the response body. Enter and Shift+Enter step forward and back through matches, the current match is highlighted more strongly than the rest, and the counter reads `3 of 12`. Matching is case-sensitive and stops counting after 5,000 hits on one preview page. A large body is shown a page at a time; pages are 1 MiB, or 128 KiB when the content has very long lines, since a single unbroken line of a million characters is expensive to lay out.
 
 ## Try locally
 
