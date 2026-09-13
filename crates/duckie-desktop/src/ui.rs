@@ -1059,6 +1059,9 @@ impl Duckie {
         });
         if view.result.outcome != Outcome::Complete {
             ui.colored_label(warning(ui), view.result.outcome.to_string());
+            if let Some(detail) = &view.result.body_error {
+                ui.weak(detail);
+            }
             ui.weak("Automatic tests skipped for an incomplete response.");
         }
         let current = &self.drafts[self.selected];
@@ -1200,8 +1203,45 @@ impl Duckie {
                 if view.binary {
                     ui.add_space(20.0);
                     ui.label("Binary response");
-                    ui.weak("Save the body to inspect it in another application.");
+                    if let Some(charset) = &view.charset {
+                        ui.weak(format!(
+                            "The declared charset {charset:?} is not supported."
+                        ));
+                    } else {
+                        ui.weak("The bytes are not valid UTF-8 or contain NUL characters.");
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Preview as UTF-8").clicked() {
+                            view.charset_override = Some("utf-8".into());
+                            page = Some(view.offset);
+                        }
+                        if ui.button("Preview as Windows-1252").clicked() {
+                            view.charset_override = Some("windows-1252".into());
+                            page = Some(view.offset);
+                        }
+                    });
+                    ui.weak(
+                        "Replacement characters may be shown; saving keeps the original bytes.",
+                    );
                 } else {
+                    ui.horizontal_wrapped(|ui| {
+                        if let Some(charset) = &view.charset {
+                            ui.weak(format!(
+                                "Decoded as {charset}{}",
+                                if view.charset_override.is_some() {
+                                    " (override)"
+                                } else {
+                                    ""
+                                }
+                            ));
+                        }
+                        if view.charset_override.is_some()
+                            && ui.button("Use detected encoding").clicked()
+                        {
+                            view.charset_override = None;
+                            page = Some(view.offset);
+                        }
+                    });
                     // A match waiting for its page: reveal it now that the page has arrived.
                     if let Some(at) = view.reveal_at
                         && (view.offset..view.offset + view.page).contains(&at)
@@ -1367,11 +1407,21 @@ impl Duckie {
             // Take everything needed from the view before calling back into `self`.
             let run_id = view.result.run_id.clone();
             let body = view.result.body.clone();
+            let headers = view.result.headers.clone();
+            let charset_override = view.charset_override.clone();
+            let charset = view.charset.clone();
             if let Some(offset) = page {
-                self.preview(id.clone(), run_id, body.clone(), offset);
+                self.preview(
+                    id.clone(),
+                    run_id,
+                    body.clone(),
+                    headers,
+                    offset,
+                    charset_override,
+                );
             }
             if let Some(query) = start_search {
-                self.search_body(id, body, query);
+                self.search_body(id, body, query, charset);
             }
         }
         if let Some(body) = save
@@ -1871,6 +1921,7 @@ mod tests {
                     // Declared JSON, so the preview is syntax-coloured and the measurement covers
                     // the scanner rather than only the plain path.
                     headers: vec![("content-type".into(), "application/json".into())],
+                    body_error: None,
                     body: BodyHandle::Memory(std::sync::Arc::new(body.clone().into_bytes())),
                     encoded_bytes: body.len() as u64,
                     duration_ms: 1,
@@ -1878,6 +1929,8 @@ mod tests {
                 preview: body,
                 pretty: None,
                 binary: false,
+                charset: None,
+                charset_override: None,
                 offset: 0,
                 page: MIB,
                 search: Default::default(),
@@ -2024,6 +2077,7 @@ mod tests {
                     status: Some(200),
                     status_text: "OK".into(),
                     headers: vec![("content-type".into(), "application/json".into())],
+                    body_error: None,
                     body: BodyHandle::Memory(std::sync::Arc::new(
                         br#"{"duck":1,"duck2":2}"#.to_vec(),
                     )),
@@ -2033,6 +2087,8 @@ mod tests {
                 preview: "{\"duck\":1,\n\"duck2\":2}".into(),
                 pretty: None,
                 binary: false,
+                charset: None,
+                charset_override: None,
                 offset: 0,
                 // Smaller than the body, so the paging controls render too.
                 page: 8,

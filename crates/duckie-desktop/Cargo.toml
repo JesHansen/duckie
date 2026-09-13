@@ -22,6 +22,7 @@ duckie-openapi.workspace = true
 duckie-app.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+encoding_rs = "0.8"
 anyhow.workspace = true
 url.workspace = true
 tokio.workspace = true

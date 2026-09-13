@@ -19,6 +19,7 @@ fn input(source: &str) -> TestInput {
         status: Some(500),
         status_text: "Internal Server Error".into(),
         headers: vec![],
+        body_error: None,
         body: BodyHandle::Memory(Arc::new(b"{}".to_vec())),
         encoded_bytes: 2,
         duration_ms: 5,

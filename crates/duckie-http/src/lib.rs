@@ -102,6 +102,7 @@ impl HttpEngine {
             status: None,
             status_text: String::new(),
             headers: vec![],
+            body_error: None,
             body: BodyHandle::default(),
             encoded_bytes: 0,
             duration_ms: 0,
@@ -181,13 +182,7 @@ impl HttpEngine {
                     )
                 })
                 .collect();
-            let encoding = response
-                .headers()
-                .get("content-encoding")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase();
+            let encoding = content_encoding(response.headers());
             // A declared length is of the encoded body, so it pairs with the encoded counter.
             progress
                 .0
@@ -205,18 +200,19 @@ impl HttpEngine {
             use async_compression::tokio::bufread::{
                 BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder,
             };
-            let mut reader: Pin<Box<dyn AsyncRead + Send>> = match encoding.as_str() {
-                "" | "identity" => Box::pin(buffered),
-                "gzip" => {
+            let mut reader: Pin<Box<dyn AsyncRead + Send>> = match encoding {
+                Ok(ContentEncoding::Identity) => Box::pin(buffered),
+                Ok(ContentEncoding::Gzip) => {
                     let mut d = GzipDecoder::new(buffered);
                     d.multiple_members(true);
                     Box::pin(d)
                 }
-                "deflate" => Box::pin(ZlibDecoder::new(buffered)),
-                "br" => Box::pin(BrotliDecoder::new(buffered)),
-                "zstd" => Box::pin(ZstdDecoder::new(buffered)),
-                _ => {
+                Ok(ContentEncoding::Deflate) => Box::pin(ZlibDecoder::new(buffered)),
+                Ok(ContentEncoding::Brotli) => Box::pin(BrotliDecoder::new(buffered)),
+                Ok(ContentEncoding::Zstd) => Box::pin(ZstdDecoder::new(buffered)),
+                Err(detail) => {
                     result.outcome = Outcome::BodyError;
+                    result.body_error = Some(detail);
                     Box::pin(buffered)
                 }
             };
@@ -253,6 +249,88 @@ impl HttpEngine {
         Ok(result)
     }
 }
+
+const CONTENT_ENCODING_HELP: &str = "Duckie supports gzip, deflate, br, and zstd.";
+const MAX_CONTENT_ENCODINGS: usize = 4;
+const MAX_CONTENT_ENCODING_LEN: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContentEncoding {
+    Identity,
+    Gzip,
+    Deflate,
+    Brotli,
+    Zstd,
+}
+
+/// Returns the one coding Duckie can decode. HTTP allows a list of codings, but decoding a
+/// stack safely requires applying it in reverse order; leave that explicit feature for a later
+/// release rather than pretending that a stack is a single coding.
+///
+/// The error text is safe to show: it contains only lower-cased RFC token characters after small
+/// bounds checks, never the response's raw header bytes.
+fn content_encoding(headers: &reqwest::header::HeaderMap) -> Result<ContentEncoding, String> {
+    let mut codings = Vec::new();
+    for value in headers.get_all(reqwest::header::CONTENT_ENCODING) {
+        let Ok(value) = value.to_str() else {
+            return Err(invalid_content_encoding());
+        };
+        for item in value.split(',') {
+            let token = item.trim_matches([' ', '\t']);
+            if !is_content_coding_token(token) || codings.len() == MAX_CONTENT_ENCODINGS {
+                return Err(invalid_content_encoding());
+            }
+            codings.push(token.to_ascii_lowercase());
+        }
+    }
+    match codings.as_slice() {
+        [] => Ok(ContentEncoding::Identity),
+        [identity] if identity == "identity" => Ok(ContentEncoding::Identity),
+        [coding] => match coding.as_str() {
+            "gzip" => Ok(ContentEncoding::Gzip),
+            "deflate" => Ok(ContentEncoding::Deflate),
+            "br" => Ok(ContentEncoding::Brotli),
+            "zstd" => Ok(ContentEncoding::Zstd),
+            _ => Err(format!(
+                "Unsupported Content-Encoding {coding:?}. {CONTENT_ENCODING_HELP}"
+            )),
+        },
+        _ => Err(format!(
+            "Unsupported stacked Content-Encoding: {}. Duckie supports exactly one encoding.",
+            codings.join(", ")
+        )),
+    }
+}
+
+fn invalid_content_encoding() -> String {
+    format!("Unsupported Content-Encoding. {CONTENT_ENCODING_HELP}")
+}
+
+fn is_content_coding_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= MAX_CONTENT_ENCODING_LEN
+        && token.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
 fn classify(error: &reqwest::Error) -> Outcome {
     if error.is_timeout() {
         return Outcome::Timeout;
@@ -664,6 +742,94 @@ mod tests {
         assert_eq!(result.outcome, Outcome::DecodedLimit);
         assert_eq!(result.body.len(), 128 * 1024);
         assert!(result.encoded_bytes < 10 * 1024);
+    }
+    #[tokio::test]
+    async fn unknown_content_encoding_has_safe_actionable_detail() {
+        let body = b"do not include this response body in diagnostics";
+        let mut response =
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: rot13\r\nContent-Length: ".to_vec();
+        response.extend_from_slice(body.len().to_string().as_bytes());
+        response.extend_from_slice(b"\r\n\r\n");
+        response.extend_from_slice(body);
+        let result = HttpEngine::default()
+            .execute(prepared(server(response).await), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::BodyError);
+        assert_eq!(
+            result.body_error.as_deref(),
+            Some(
+                "Unsupported Content-Encoding \"rot13\". Duckie supports gzip, deflate, br, and zstd."
+            )
+        );
+        assert!(result.body.is_empty());
+        assert!(!result.body_error.unwrap().contains("response body"));
+    }
+    #[tokio::test]
+    async fn stacked_content_encoding_names_only_safe_codings() {
+        let result = HttpEngine::default()
+            .execute(
+                prepared(
+                    server(
+                        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip, br\r\nContent-Length: 0\r\n\r\n"
+                            .to_vec(),
+                    )
+                    .await,
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::BodyError);
+        assert_eq!(
+            result.body_error.as_deref(),
+            Some(
+                "Unsupported stacked Content-Encoding: gzip, br. Duckie supports exactly one encoding."
+            )
+        );
+    }
+    #[test]
+    fn content_encoding_validation_never_echoes_malformed_values() {
+        let invalid = [
+            b"gzip,,br".as_slice(),
+            b"gzip;secret".as_slice(),
+            &[b'x'; MAX_CONTENT_ENCODING_LEN + 1],
+            b"\x80".as_slice(),
+        ];
+        for value in invalid {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::CONTENT_ENCODING,
+                reqwest::header::HeaderValue::from_bytes(value).unwrap(),
+            );
+            assert_eq!(
+                content_encoding(&headers),
+                Err(
+                    "Unsupported Content-Encoding. Duckie supports gzip, deflate, br, and zstd."
+                        .into()
+                ),
+                "{value:?}"
+            );
+        }
+    }
+    #[test]
+    fn repeated_content_encoding_is_reported_as_stacked() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("gzip"),
+        );
+        headers.append(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("br"),
+        );
+        assert_eq!(
+            content_encoding(&headers),
+            Err(
+                "Unsupported stacked Content-Encoding: gzip, br. Duckie supports exactly one encoding."
+                    .into()
+            )
+        );
     }
     #[tokio::test]
     async fn sends_auth_duplicate_query_and_authored_body_exactly_once() {

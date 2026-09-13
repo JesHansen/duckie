@@ -33,6 +33,8 @@ The body, test and response-body views are monospace editors with a line-number 
 
 In the response body's **Raw** view, find searches the whole body, not just the visible page: the scan runs in the background in bounded chunks, so a body that only exists on disk is never loaded whole, and stepping to a match loads the page holding it and selects it. The **Pretty** view is a reformatted copy whose offsets do not map back to the body, so find there stays page-local and says so. Scans stop after 50,000 matches, and replacing the query abandons a scan already running.
 
+Response text follows a supported `charset` declared in `Content-Type`, including common legacy encodings such as Windows-1252. If the charset is unknown or undeclared bytes are not valid UTF-8, Duckie keeps treating the response as binary but offers explicit UTF-8 and Windows-1252 preview choices. Those choices affect display and find only: Save body and response tests continue to use the original bytes. Unsupported or stacked `Content-Encoding` values stop body processing and report a sanitized, actionable diagnostic without echoing arbitrary header data.
+
 ## Try locally
 
 ```powershell
@@ -91,4 +93,4 @@ The UI uses [eframe/egui](https://docs.rs/eframe/0.36.2/eframe/); assertions use
 
 MIT — see [LICENSE](LICENSE).
 
-Every one of the 254 third-party crates linked into the binaries declares a permissive license, and none is copyleft. Where a crate offers a choice, Duckie takes the permissive option: `self_cell` is used under Apache-2.0 rather than GPL-2.0-only. `epaint_default_fonts` embeds typefaces under OFL-1.1 and the Ubuntu Font Licence, which allow redistribution inside an application but not sale of the fonts by themselves. Re-check `THIRD_PARTY_NOTICES.md` whenever `Cargo.lock` changes.
+Every third-party crate linked into the binaries declares a permissive license, and none is copyleft. Where a crate offers a choice, Duckie takes the permissive option: `self_cell` is used under Apache-2.0 rather than GPL-2.0-only. `epaint_default_fonts` embeds typefaces under OFL-1.1 and the Ubuntu Font Licence, which allow redistribution inside an application but not sale of the fonts by themselves. Re-check the generated `THIRD_PARTY_NOTICES.md` whenever `Cargo.lock` changes.

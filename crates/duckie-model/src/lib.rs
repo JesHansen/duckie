@@ -807,6 +807,9 @@ pub struct ExecutionResult {
     pub status: Option<u16>,
     pub status_text: String,
     pub headers: Vec<(String, String)>,
+    /// Safe, user-facing detail for an incomplete response body. Transport implementations must
+    /// not include request URLs, credentials, or arbitrary header bytes here.
+    pub body_error: Option<String>,
     pub body: BodyHandle,
     pub encoded_bytes: u64,
     pub duration_ms: u64,

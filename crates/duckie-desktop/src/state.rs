@@ -30,6 +30,44 @@ pub fn page_size(bytes: &[u8]) -> u64 {
         .unwrap_or(0);
     if longest > LONG_LINE { 128 * 1024 } else { MIB }
 }
+fn declared_charset(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .and_then(|(_, value)| {
+            value.split(';').skip(1).find_map(|parameter| {
+                let (name, value) = parameter.split_once('=')?;
+                name.trim().eq_ignore_ascii_case("charset").then(|| {
+                    value
+                        .trim()
+                        .trim_matches(|c| c == '\'' || c == '"')
+                        .to_owned()
+                })
+            })
+        })
+        .filter(|label| !label.is_empty())
+}
+fn decode_preview(
+    bytes: &[u8],
+    declared: Option<&str>,
+    force_text: bool,
+) -> (String, bool, Option<String>) {
+    let encoding = declared.and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()));
+    if let Some(encoding) = encoding {
+        let (text, _, errors) = encoding.decode(bytes);
+        return (
+            text.into_owned(),
+            !force_text && errors,
+            Some(encoding.name().to_owned()),
+        );
+    }
+    (
+        String::from_utf8_lossy(bytes).into_owned(),
+        !force_text
+            && (declared.is_some() || bytes.contains(&0) || std::str::from_utf8(bytes).is_err()),
+        declared.map(str::to_owned),
+    )
+}
 pub const EXAMPLE: &str = "test(\"returns a successful JSON response\", () => {\n  expect(response.status).toBe(200);\n  expect(response.header(\"content-type\")).toContain(\"application/json\");\n  expect(response.json()).toBeType(\"object\");\n});\n";
 #[derive(PartialEq, Clone, Copy)]
 pub enum RequestTab {
@@ -69,6 +107,10 @@ pub struct ResponseView {
     pub preview: String,
     pub pretty: Option<String>,
     pub binary: bool,
+    /// Encoding used for the displayed text, when it came from a declared supported charset.
+    pub charset: Option<String>,
+    /// An explicit display encoding chosen by the user; `None` follows Content-Type/UTF-8 detection.
+    pub charset_override: Option<String>,
     pub offset: u64,
     /// Bytes shown per page. Shrinks for very long lines; see `page_size`.
     pub page: u64,
@@ -80,6 +122,13 @@ pub struct ResponseView {
     pub environment: Values,
     pub viewed: u64,
 }
+pub struct PreviewContent {
+    pub text: String,
+    pub pretty: Option<String>,
+    pub binary: bool,
+    pub page: u64,
+    pub charset: Option<String>,
+}
 pub enum IoEvent {
     Opened(Result<Collection>),
     Saved(Result<Collection>),
@@ -88,7 +137,7 @@ pub enum IoEvent {
         id: String,
         run_id: String,
         offset: u64,
-        result: Result<(String, Option<String>, bool, u64)>,
+        result: Result<PreviewContent>,
     },
     Searched {
         id: String,
@@ -449,14 +498,25 @@ impl Duckie {
             Err(e) => self.status = e.to_string(),
         }
     }
-    pub fn preview(&self, id: String, run_id: String, body: BodyHandle, offset: u64) {
+    pub fn preview(
+        &self,
+        id: String,
+        run_id: String,
+        body: BodyHandle,
+        headers: Vec<(String, String)>,
+        offset: u64,
+        charset_override: Option<String>,
+    ) {
         self.background(move || IoEvent::Preview {
             id,
             run_id,
             offset,
             result: (|| {
                 let bytes = body.read(offset, MIB)?;
-                let binary = bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
+                let declared = declared_charset(&headers);
+                let selected = charset_override.as_deref().or(declared.as_deref());
+                let forced = charset_override.is_some();
+                let (_, binary, charset) = decode_preview(&bytes, selected, forced);
                 let pretty = if offset == 0 && body.len() <= MIB {
                     serde_json::from_slice::<serde_json::Value>(&bytes)
                         .ok()
@@ -465,19 +525,28 @@ impl Duckie {
                     None
                 };
                 let page = page_size(&bytes);
-                let shown = &bytes[..(page as usize).min(bytes.len())];
-                Ok((
-                    String::from_utf8_lossy(shown).into_owned(),
+                let shown_len = (page as usize).min(bytes.len());
+                // Decode only the selected page after using the larger sample for classification.
+                let shown = decode_preview(&bytes[..shown_len], selected, forced).0;
+                Ok(PreviewContent {
+                    text: shown,
                     pretty,
                     binary,
                     page,
-                ))
+                    charset,
+                })
             })(),
         });
     }
     /// Scans the whole body for `query` on a background thread. The generation counter cancels a
     /// scan whose query the user has already replaced, so typing cannot pile up 50 MiB scans.
-    pub fn search_body(&mut self, id: String, body: BodyHandle, query: String) {
+    pub fn search_body(
+        &mut self,
+        id: String,
+        body: BodyHandle,
+        query: String,
+        charset: Option<String>,
+    ) {
         let run_id = match self.responses.get_mut(&id) {
             Some(view) => {
                 view.search = BodySearch {
@@ -493,8 +562,18 @@ impl Duckie {
         let mine = generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
         self.background(move || {
             let cancelled = || generation.load(std::sync::atomic::Ordering::Acquire) != mine;
+            let encoded;
+            let needle = if let Some(encoding) = charset
+                .as_deref()
+                .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+            {
+                encoded = encoding.encode(&query).0.into_owned();
+                encoded.as_slice()
+            } else {
+                query.as_bytes()
+            };
             let result = body
-                .find_all(query.as_bytes(), MAX_BODY_HITS, &cancelled)
+                .find_all(needle, MAX_BODY_HITS, &cancelled)
                 .map(|offsets| {
                     let capped = offsets.len() == MAX_BODY_HITS;
                     (offsets, capped)
@@ -524,7 +603,14 @@ impl Duckie {
             match event {
                 RunEvent::Response(result) => {
                     let id = result.request_id.clone();
-                    self.preview(id.clone(), result.run_id.clone(), result.body.clone(), 0);
+                    self.preview(
+                        id.clone(),
+                        result.run_id.clone(),
+                        result.body.clone(),
+                        result.headers.clone(),
+                        0,
+                        None,
+                    );
                     self.clock += 1;
                     if !self.responses.contains_key(&id) && self.responses.len() >= 3 {
                         let selected = &self.drafts[self.selected].request.id;
@@ -548,6 +634,8 @@ impl Duckie {
                             preview: "Preparing preview…".into(),
                             pretty: None,
                             binary: false,
+                            charset: None,
+                            charset_override: None,
                             offset: 0,
                             page: MIB,
                             search: Default::default(),
@@ -643,12 +731,13 @@ impl Duckie {
                         && view.result.run_id == run_id
                     {
                         match result {
-                            Ok((text, pretty, binary, page)) => {
-                                view.preview = text;
-                                view.pretty = pretty;
-                                view.binary = binary;
+                            Ok(preview) => {
+                                view.preview = preview.text;
+                                view.pretty = preview.pretty;
+                                view.binary = preview.binary;
+                                view.charset = preview.charset;
                                 view.offset = offset;
-                                view.page = page;
+                                view.page = preview.page;
                             }
                             Err(e) => view.preview = format!("Preview unavailable: {e}"),
                         }
@@ -863,5 +952,37 @@ impl Duckie {
                 self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_quoted_charset_case_insensitively() {
+        let headers = vec![(
+            "Content-Type".into(),
+            "text/plain; format=flowed; CHARSET=\"windows-1252\"".into(),
+        )];
+        assert_eq!(declared_charset(&headers).as_deref(), Some("windows-1252"));
+    }
+
+    #[test]
+    fn decodes_declared_legacy_text_without_changing_source_bytes() {
+        let bytes = b"caf\xe9";
+        let (text, binary, charset) = decode_preview(bytes, Some("windows-1252"), false);
+        assert_eq!(text, "caf\u{e9}");
+        assert!(!binary);
+        assert_eq!(charset.as_deref(), Some("windows-1252"));
+        assert_eq!(bytes, b"caf\xe9");
+    }
+
+    #[test]
+    fn unsupported_or_invalid_text_requires_explicit_override() {
+        let bytes = b"bad\xfftext";
+        assert!(decode_preview(bytes, Some("made-up"), false).1);
+        assert!(decode_preview(bytes, None, false).1);
+        assert!(!decode_preview(bytes, None, true).1);
     }
 }

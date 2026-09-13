@@ -56,6 +56,7 @@ fn cold_test_worker_overhead() {
         status: Some(200),
         status_text: "OK".into(),
         headers: vec![("content-type".into(), "application/json".into())],
+        body_error: None,
         body: BodyHandle::Memory(Arc::new(vec![b'x'; 1024])),
         encoded_bytes: 1024,
         duration_ms: 1,
