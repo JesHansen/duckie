@@ -500,6 +500,21 @@ pub fn prepare(
     })
 }
 
+/// First occurrence of `needle` in `haystack`. Scanning for the first byte before comparing the
+/// rest keeps this close to a byte scan for the misses, which dominate.
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let (first, rest) = needle.split_first()?;
+    let mut at = 0;
+    while let Some(hit) = haystack[at..].iter().position(|b| b == first) {
+        let start = at + hit;
+        let after = start + 1;
+        if haystack.len() >= after + rest.len() && &haystack[after..after + rest.len()] == rest {
+            return Some(start);
+        }
+        at = after;
+    }
+    None
+}
 #[derive(Clone)]
 pub enum BodyHandle {
     Memory(Arc<Vec<u8>>),
@@ -538,6 +553,44 @@ impl BodyHandle {
                 Ok(v)
             }
         }
+    }
+    /// Byte offsets of every occurrence of `needle`, scanned in bounded chunks so a body that
+    /// only exists on disk is never loaded whole. Chunks overlap by `needle.len() - 1` bytes so a
+    /// match straddling a boundary is still found, and only matches starting inside the chunk
+    /// proper are recorded, so the overlap cannot report one twice.
+    ///
+    /// Stops at `limit` matches, and calls `cancelled` between chunks so a query the user has
+    /// already replaced can abandon a long scan.
+    pub fn find_all(
+        &self,
+        needle: &[u8],
+        limit: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::io::Result<Vec<u64>> {
+        let mut found = vec![];
+        if needle.is_empty() || needle.len() as u64 > self.len() {
+            return Ok(found);
+        }
+        let span = needle.len() as u64 - 1;
+        let mut start = 0u64;
+        while start < self.len() && found.len() < limit && !cancelled() {
+            let chunk = self.read(start, MIB + span)?;
+            let mut at = 0usize;
+            while let Some(hit) = find_bytes(&chunk[at..], needle) {
+                let absolute = start + (at + hit) as u64;
+                // Matches beyond the chunk proper belong to the next chunk's own scan.
+                if absolute >= start + MIB {
+                    break;
+                }
+                found.push(absolute);
+                if found.len() == limit {
+                    break;
+                }
+                at += hit + 1;
+            }
+            start += MIB;
+        }
+        Ok(found)
     }
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         match self {
@@ -610,6 +663,28 @@ pub struct TestCase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn find_all_spans_chunks_without_duplicates_and_honours_limits() {
+        let never = || false;
+        // A match placed exactly on the chunk seam is the case the overlap exists for.
+        let mut bytes = vec![b'.'; (MIB + 10) as usize];
+        let seam = (MIB - 2) as usize;
+        bytes[seam..seam + 4].copy_from_slice(b"duck");
+        bytes[0..4].copy_from_slice(b"duck");
+        let body = BodyHandle::Memory(std::sync::Arc::new(bytes));
+        assert_eq!(
+            body.find_all(b"duck", 100, &never).unwrap(),
+            vec![0, seam as u64]
+        );
+
+        let body = BodyHandle::Memory(std::sync::Arc::new(b"aaaa".to_vec()));
+        // Overlapping candidates are reported from each start position.
+        assert_eq!(body.find_all(b"aa", 100, &never).unwrap(), vec![0, 1, 2]);
+        assert_eq!(body.find_all(b"aa", 2, &never).unwrap(), vec![0, 1]);
+        assert!(body.find_all(b"", 100, &never).unwrap().is_empty());
+        assert!(body.find_all(b"aaaaaaa", 100, &never).unwrap().is_empty());
+        assert!(body.find_all(b"a", 100, &|| true).unwrap().is_empty());
+    }
     #[test]
     fn query_preserves_literals_and_duplicates() {
         let mut r = RequestDefinition::default();

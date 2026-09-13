@@ -11,6 +11,9 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Whole-body matches retained. Far above what anyone navigates by hand, and enough that the
+/// count stays honest for a realistic search.
+pub const MAX_BODY_HITS: usize = 50_000;
 /// Bytes of a response body to show at once.
 ///
 /// Laying text out costs roughly 200 bytes of glyph and mesh data per character regardless of
@@ -52,6 +55,15 @@ pub struct Draft {
     pub dirty: bool,
     pub error: String,
 }
+/// Whole-body search results. Offsets are absolute byte positions in the response body, so they
+/// stay meaningful across page changes, unlike the per-page hits the editor highlights.
+#[derive(Default)]
+pub struct BodySearch {
+    pub query: String,
+    pub offsets: Vec<u64>,
+    pub running: bool,
+    pub capped: bool,
+}
 pub struct ResponseView {
     pub result: ExecutionResult,
     pub preview: String,
@@ -60,6 +72,9 @@ pub struct ResponseView {
     pub offset: u64,
     /// Bytes shown per page. Shrinks for very long lines; see `page_size`.
     pub page: u64,
+    pub search: BodySearch,
+    /// Absolute offset of a match to select once the page holding it has loaded.
+    pub reveal_at: Option<u64>,
     pub report: Option<TestReport>,
     pub test_revision: u64,
     pub environment: Values,
@@ -74,6 +89,12 @@ pub enum IoEvent {
         run_id: String,
         offset: u64,
         result: Result<(String, Option<String>, bool, u64)>,
+    },
+    Searched {
+        id: String,
+        run_id: String,
+        query: String,
+        result: Result<(Vec<u64>, bool)>,
     },
     Message(Result<String>),
     Secrets(Result<SecretsFile>),
@@ -166,6 +187,8 @@ pub struct Duckie {
     pub delete: Option<usize>,
     pub about: bool,
     pub focus_url: bool,
+    /// Bumped for every new scan; a worker whose generation no longer matches stops early.
+    pub search_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub reveal: bool,
     pub new_env: String,
 }
@@ -225,6 +248,7 @@ impl Duckie {
             delete: None,
             about: false,
             focus_url: true,
+            search_generation: Default::default(),
             reveal: false,
             new_env: String::new(),
         };
@@ -436,6 +460,39 @@ impl Duckie {
             })(),
         });
     }
+    /// Scans the whole body for `query` on a background thread. The generation counter cancels a
+    /// scan whose query the user has already replaced, so typing cannot pile up 50 MiB scans.
+    pub fn search_body(&mut self, id: String, body: BodyHandle, query: String) {
+        let run_id = match self.responses.get_mut(&id) {
+            Some(view) => {
+                view.search = BodySearch {
+                    query: query.clone(),
+                    running: true,
+                    ..Default::default()
+                };
+                view.result.run_id.clone()
+            }
+            None => return,
+        };
+        let generation = self.search_generation.clone();
+        let mine = generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        self.background(move || {
+            let cancelled = || generation.load(std::sync::atomic::Ordering::Acquire) != mine;
+            let result = body
+                .find_all(query.as_bytes(), MAX_BODY_HITS, &cancelled)
+                .map(|offsets| {
+                    let capped = offsets.len() == MAX_BODY_HITS;
+                    (offsets, capped)
+                })
+                .map_err(Into::into);
+            IoEvent::Searched {
+                id,
+                run_id,
+                query,
+                result,
+            }
+        });
+    }
     pub fn poll(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -467,6 +524,8 @@ impl Duckie {
                             binary: false,
                             offset: 0,
                             page: MIB,
+                            search: Default::default(),
+                            reveal_at: None,
                             report: None,
                             environment: self.active_environment.clone(),
                             viewed: self.clock,
@@ -564,6 +623,28 @@ impl Duckie {
                                 view.page = page;
                             }
                             Err(e) => view.preview = format!("Preview unavailable: {e}"),
+                        }
+                    }
+                }
+                IoEvent::Searched {
+                    id,
+                    run_id,
+                    query,
+                    result,
+                } => {
+                    // A result is only interesting while it still describes the response on
+                    // screen and the query the user is still typing.
+                    if let Some(view) = self.responses.get_mut(&id)
+                        && view.result.run_id == run_id
+                        && view.search.query == query
+                    {
+                        view.search.running = false;
+                        match result {
+                            Ok((offsets, capped)) => {
+                                view.search.offsets = offsets;
+                                view.search.capped = capped;
+                            }
+                            Err(e) => self.status = format!("Search failed: {e}"),
                         }
                     }
                 }

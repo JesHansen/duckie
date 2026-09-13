@@ -125,6 +125,16 @@ enum SidebarRow {
     },
     Request(usize),
 }
+/// Character range of the page hit that starts at `byte`, for selecting a whole-body match once
+/// its page has loaded. Falls back to a caret at that position when the hit is not on this page,
+/// which happens when a page boundary splits the match.
+fn char_range_at(text: &str, byte: usize, found: &[editor::Hit]) -> Option<std::ops::Range<usize>> {
+    if let Some(hit) = found.iter().find(|hit| hit.bytes.start == byte) {
+        return Some(hit.chars.clone());
+    }
+    let chars = text.char_indices().take_while(|(at, _)| *at < byte).count();
+    Some(chars..chars)
+}
 /// The folder a request belongs to, with a name for those that declare none.
 fn folder_of(request: &RequestDefinition) -> &str {
     let folder = request.folder.trim();
@@ -1054,6 +1064,8 @@ impl Duckie {
         let mut page = None;
         let mut save = None;
         let mut location = None;
+        let mut start_search = None;
+        let mut go_to = None;
         match self.response_tab {
             ResponseTab::Body => {
                 let shown = if self.pretty {
@@ -1063,19 +1075,41 @@ impl Duckie {
                 };
                 let found = editor::hits(shown, &self.response_find.query);
                 let mut reveal = None;
+                // Raw text is the body byte-for-byte, so whole-body offsets map onto the page.
+                // The pretty-printed view is a different string, so find stays page-local there.
+                let whole_body = !self.pretty || view.pretty.is_none();
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(view.pretty.is_some(), |ui| {
                         ui.selectable_value(&mut self.pretty, true, "Pretty");
                         ui.selectable_value(&mut self.pretty, false, "Raw");
                     });
-                    if editor::find_bar(ui, "response-find", &mut self.response_find, found.len()) {
-                        reveal = found
-                            .get(self.response_find.index)
-                            .map(|hit| hit.chars.clone());
+                    let total = if whole_body {
+                        view.search.offsets.len()
+                    } else {
+                        found.len()
+                    };
+                    if editor::find_bar(ui, "response-find", &mut self.response_find, total) {
+                        if whole_body {
+                            go_to = view.search.offsets.get(self.response_find.index).copied();
+                        } else {
+                            reveal = found
+                                .get(self.response_find.index)
+                                .map(|hit| hit.chars.clone());
+                        }
                     }
-                    // Find sees only the loaded page, so say so rather than implying a whole-body count.
-                    if !self.response_find.query.is_empty() && view.result.body.len() > view.page {
-                        ui.weak("on this page");
+                    if !self.response_find.query.is_empty() {
+                        if !whole_body && view.result.body.len() > view.page {
+                            // The pretty view cannot be mapped back to body offsets, so its count
+                            // covers the page alone; say so rather than implying otherwise.
+                            ui.weak("on this page");
+                        } else if whole_body && view.search.query != self.response_find.query {
+                            start_search = Some(self.response_find.query.clone());
+                            ui.weak("Searching…");
+                        } else if view.search.running {
+                            ui.weak("Searching…");
+                        } else if view.search.capped {
+                            ui.weak("first matches only");
+                        }
                     }
                     if ui.button("Copy").clicked() {
                         ui.ctx().copy_text(
@@ -1131,6 +1165,26 @@ impl Duckie {
                     ui.label("Binary response");
                     ui.weak("Save the body to inspect it in another application.");
                 } else {
+                    // A match waiting for its page: reveal it now that the page has arrived.
+                    if let Some(at) = view.reveal_at
+                        && (view.offset..view.offset + view.page).contains(&at)
+                    {
+                        reveal = char_range_at(shown, (at - view.offset) as usize, &found);
+                        view.reveal_at = None;
+                    }
+                    // Highlighting is page-local, so the current whole-body match has to be
+                    // renumbered against this page to be the one drawn as current.
+                    let current = if whole_body {
+                        let before = view
+                            .search
+                            .offsets
+                            .iter()
+                            .take_while(|at| **at < view.offset)
+                            .count();
+                        self.response_find.index.saturating_sub(before)
+                    } else {
+                        self.response_find.index
+                    };
                     // Read-only: `&str` is an immutable `TextBuffer`, so the editor cannot edit it.
                     // The id carries the request so each one keeps its own scroll position.
                     editor::code(
@@ -1139,7 +1193,7 @@ impl Duckie {
                         &mut shown.as_str(),
                         4,
                         &found,
-                        self.response_find.index,
+                        current,
                         reveal,
                     );
                 }
@@ -1253,10 +1307,24 @@ impl Duckie {
                 });
             }
         }
-        if let Some(offset) = page {
+        // A jump lands the match a little way into the page so there is context before it.
+        if let Some(at) = go_to {
+            let start = at.saturating_sub(2048);
+            view.reveal_at = Some(at);
+            if !(view.offset..view.offset + view.page).contains(&at) {
+                page = Some(start);
+            }
+        }
+        if page.is_some() || start_search.is_some() {
+            // Take everything needed from the view before calling back into `self`.
             let run_id = view.result.run_id.clone();
             let body = view.result.body.clone();
-            self.preview(id, run_id, body, offset);
+            if let Some(offset) = page {
+                self.preview(id.clone(), run_id, body.clone(), offset);
+            }
+            if let Some(query) = start_search {
+                self.search_body(id, body, query);
+            }
         }
         if let Some(body) = save
             && let Some(path) = rfd::FileDialog::new()
@@ -1667,6 +1735,16 @@ mod tests {
         assert_eq!(app.env_index, 0);
     }
     #[test]
+    fn char_range_at_selects_the_page_hit_or_falls_back_to_a_caret() {
+        let text = "üduck.duck";
+        let found = editor::hits(text, "duck");
+        // "duck" starts at byte 2 because "ü" is two bytes, but at character 1.
+        assert_eq!(char_range_at(text, 2, &found), Some(1..5));
+        assert_eq!(char_range_at(text, 7, &found), Some(6..10));
+        // An offset that is not the start of a hit leaves a caret there instead.
+        assert_eq!(char_range_at(text, 6, &found), Some(5..5));
+    }
+    #[test]
     fn page_size_shrinks_only_for_very_long_lines() {
         let wrapped: Vec<u8> = "x".repeat(79).into_bytes();
         let mut multiline = vec![];
@@ -1729,6 +1807,8 @@ mod tests {
                 offset: 0,
                 // Smaller than the body, so the paging controls render too.
                 page: 8,
+                search: Default::default(),
+                reveal_at: None,
                 report: Some(TestReport {
                     tests: vec![TestCase {
                         name: "a".into(),
