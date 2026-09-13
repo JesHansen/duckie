@@ -458,6 +458,87 @@ mod tests {
         )
         .unwrap()
     }
+    async fn request_target(request: RequestDefinition) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 1024];
+            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "client closed before sending request headers");
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(bytes)
+                .unwrap()
+                .split_once("\r\n")
+                .unwrap()
+                .0
+                .to_owned()
+        });
+        let prepared = prepare(
+            &RequestDefinition {
+                url: format!("http://{address}/items/{{{{request.id}}}}/detail"),
+                proxy: ProxyMode::Direct,
+                ..request
+            },
+            &EnvironmentSnapshot::default(),
+            &RunBindings::default(),
+            1,
+        )
+        .unwrap();
+        let result = HttpEngine::default()
+            .execute(prepared, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.status, Some(200));
+        server.await.unwrap()
+    }
+    #[tokio::test]
+    async fn path_values_reach_the_wire_without_changing_url_structure() {
+        for (value, expected_target) in [
+            ("a/b", "/items/a%2Fb/detail"),
+            ("a?b", "/items/a%3Fb/detail"),
+            ("a#b", "/items/a%23b/detail"),
+            ("a\\b", "/items/a%5Cb/detail"),
+            ("a%2Fb", "/items/a%2Fb/detail"),
+            ("a \t", "/items/a%20%09/detail"),
+        ] {
+            let mut request = RequestDefinition::default();
+            request.variables.insert("id".into(), value.into());
+            let first_line = request_target(request).await;
+            assert_eq!(
+                first_line,
+                format!("GET {expected_target} HTTP/1.1"),
+                "{value:?}"
+            );
+        }
+    }
+    #[test]
+    fn traversal_path_values_are_rejected_before_transport() {
+        for value in [".", "..", "%2e", "%2E%2e"] {
+            let mut request = RequestDefinition {
+                url: "https://example.test/items/{{request.id}}/detail".into(),
+                ..Default::default()
+            };
+            request.variables.insert("id".into(), value.into());
+            assert!(
+                prepare(
+                    &request,
+                    &EnvironmentSnapshot::default(),
+                    &RunBindings::default(),
+                    1
+                )
+                .is_err(),
+                "{value:?} must not be normalized into a different path"
+            );
+        }
+    }
     #[tokio::test]
     async fn progress_counts_bytes_and_records_a_declared_length() {
         const SIZE: usize = 300_000;

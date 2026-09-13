@@ -4,6 +4,16 @@ A small, local HTTP workbench for Windows. **0.1.0 is the first development prev
 
 Compose a request, paste credentials, send once, inspect the response, and run JavaScript assertions. No Duckie account, telemetry, update checks, cloud service, or background API traffic. Collection files stay on your disk.
 
+## Documentation
+
+| Document | Purpose |
+| --- | --- |
+| This README | Run, use, and verify Duckie; licensing. |
+| [Implementation status](IMPLEMENTATION_STATUS.md) | Current owner decisions, accepted scope, prioritized backlog, and known defects. |
+| [Performance](PERFORMANCE.md) | Benchmark commands, measured results, and limitations. |
+| [Architecture](ARCHITECTURE.md) / [UI design](UI_DESIGN.md) | Original design proposals; later decisions in the status document take precedence. |
+| [Contributor and agent guidance](AGENTS.md) | Provider-neutral working instructions and documentation ownership. |
+
 ## Run
 
 Requirements for development: Windows x64, Rust 1.95 or newer with the MSVC toolchain, and Visual Studio C++ Build Tools with the Windows SDK. Node.js is needed only for the local development server and the two end-to-end tests that drive it.
@@ -33,9 +43,7 @@ Then open the `examples/local-api` collection in Duckie, or import `examples/ope
 
 A spec split across files imports too. References to other documents are followed relative to the document holding them — sibling files for a file import, same-origin URLs for a URL import — and onward from those, up to 50 documents and 20 MiB. Cross-origin references are **not** fetched: the credentials you gave for the spec would travel with them. Anything not retrieved is reported and still blocks the request that needs it.
 
-Parameters are expanded following the specification's style and `explode` rules, including object and array parameters in a query and the `label` and `matrix` path styles. Combinations with no defined form — an array of objects, for instance — are still blocked rather than guessed, so a wrong request is never sent silently.
-
-`node scripts/make-fixtures.mjs` generates the fixtures the performance targets in [ARCHITECTURE.md](ARCHITECTURE.md#9-performance-acceptance-targets) call for: a 1,000-request collection, a 10,000-request stress collection, and a 10+ MiB OpenAPI document, all under `fixtures/` (gitignored). Output is deterministic, so re-running it for a benchmark pass produces byte-identical fixtures.
+Parameters are expanded following the specification's supported style and `explode` rules, including object and array parameters in a query and the `label` and `matrix` path styles. Combinations with no defined form — an array of objects, for instance — are blocked rather than guessed. Variables substituted into a URL path encode structural characters such as `/`, `?`, `#`, and backslash, while preserving existing percent escapes and style punctuation. Base URL templates remain supported. Whole `.` and `..` path segments, including percent-encoded forms, are rejected before Send because URL parsing would silently normalize them.
 
 ## Local files and secrets
 
@@ -73,12 +81,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Performance targets are measured separately, against release binaries built with the development `bench` feature:
-
-```powershell
-cargo build --workspace --release --features duckie-desktop/bench
-./scripts/benchmark.ps1
-```
+Performance targets are measured separately against release binaries with the development `bench` feature. [PERFORMANCE.md](PERFORMANCE.md#measurement-setup) contains fixture generation and the full benchmark commands.
 
 Tests use deterministic loopback servers. They cover transport semantics, compressed-body limits, secret resolution, collection conflicts/recovery, import conversion, native UI rendering, real worker IPC, cancellation, and allocation failure. Two end-to-end tests need Node.js on `PATH`: they start `scripts/dev-server.mjs` on an ephemeral port and drive the shipped `examples/local-api` collection and the protected OpenAPI import all the way through send and assertion evaluation. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the remaining v1 work and [PERFORMANCE.md](PERFORMANCE.md) for measurements and release gates.
 

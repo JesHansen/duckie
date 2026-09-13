@@ -924,6 +924,43 @@ mod tests {
             Some("a,b")
         );
     }
+    #[test]
+    fn imported_path_styles_remain_compatible_with_safe_preparation() {
+        let cases = [
+            ("simple", false, json!("a/b"), "a%2Fb"),
+            ("simple", false, json!("a%2Fb"), "a%2Fb"),
+            ("label", false, json!("a/b"), ".a%2Fb"),
+            ("matrix", false, json!("a/b"), ";id=a%2Fb"),
+        ];
+        for (style, explode, example, expected) in cases {
+            let request = parameter("path", style, explode, example);
+            assert!(
+                request.blockers.is_empty(),
+                "{style}: {:?}",
+                request.blockers
+            );
+            assert!(
+                request.url.ends_with("/map/{{request.id}}"),
+                "{style}: {}",
+                request.url
+            );
+            let prepared = prepare(
+                &request,
+                &EnvironmentSnapshot {
+                    values: Values::from([("baseUrl".into(), "https://example.test".into())]),
+                    ..Default::default()
+                },
+                &RunBindings::default(),
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                prepared.url,
+                format!("https://example.test/map/{expected}"),
+                "{style}"
+            );
+        }
+    }
     fn body_of(schema: Value) -> (Vec<String>, Vec<String>) {
         body_of_with(
             schema,

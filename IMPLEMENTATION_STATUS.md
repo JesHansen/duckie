@@ -1,32 +1,100 @@
 # V1 implementation status
 
-This is a working development preview, not a declaration that all release gates in the design proposals pass. The original proposals remain intact.
+This document owns current decisions, delivery status, and remaining work. [README.md](README.md) describes using the application; [PERFORMANCE.md](PERFORMANCE.md) owns measurements and benchmark commands. The [architecture](ARCHITECTURE.md) and [UI design](UI_DESIGN.md) remain the original proposals, with the decisions below taking precedence.
 
-## Implemented
+## Owner decisions and accepted scope
 
-- Eight-crate Rust workspace with separate model, storage, HTTP, OpenAPI, assertion client/worker, orchestration, and native desktop boundaries.
-- Scratch requests; standard and custom HTTP methods; ordered duplicate query/header rows; one-pass `env`, `request`, and `secret` interpolation; run bindings; auth collision checks and redacted execution summaries.
-- Session bearer/API-key credentials, optional remembering, environment isolation, separate secret load/export, readable versioned files, explicit collection saves, stable IDs, root extension preservation, atomic replacement, interrupted-save recovery, and overwrite conflict detection.
-- JSON/text, form, multipart fields/files, streaming file bodies; Windows native TLS; HTTP/1.1 and HTTP/2; direct/system/explicit proxy selection; fixed connect timeout and adjustable request deadline; no automatic redirects or retries.
-- Bounded gzip/deflate/Brotli/Zstandard decoding with independent encoded and decoded limits, 2 MiB memory-to-file spill, 1 MiB preview pages, body saving, cancellation, and distinct transport outcomes. At most three retained responses. Response files are deleted when their final handle is released, and startup sweeps any spool file left untouched for over 24 hours by an earlier crash.
-- Immutable Send snapshots, one active run slot, independent HTTP/test outcomes, immediate response publication before evaluation, and test reruns without HTTP.
-- Isolated QuickJS assertions, synchronous API, bounded reports, engine limits, watchdog, Windows process-memory/lifetime job, cancellation, and recovery after worker failures. Failures carry the assertion message above the stack, and the test source evaluates as `tests.js` so its first frame yields the reported line. This preview starts a fresh worker for every evaluation and exits it immediately afterward; idle worker reuse is deferred.
-- Local/protected-URL OpenAPI 3.0/3.1/3.2 JSON acquisition, internal JSON-pointer references, primitive parameters, examples/defaults/generated request JSON, read-only-property omission, path/operation server precedence, auth alternatives/combined requirements, operation selection and review before import into a new collection. Parameter serialization now follows the specification's style table: `form` and `deepObject` objects and arrays in a query, `spaceDelimited` and `pipeDelimited` arrays, and `simple`, `label` and `matrix` in a path, each honouring `explode`. Object members come out in key order, which carries no meaning in JSON. Arrays of objects have no defined form in any of these styles and stay blocked. Unsupported request serialization blocks Send until manually corrected.
-- Native request/response split, editable drafts, virtualized request rows, dark/light/system theme, native dialogs, saved window bounds, keyboard shortcuts, explicit unsaved-change handling, response-to-draft/environment mismatch labels, and masked auth controls. Code editors carry a pinned line-number gutter and find with highlighted, navigable matches. Editor state/undo buffers are deliberately excluded from persistence.
+Recorded on 13 September 2026:
 
-## Before calling this v1 complete
+- **Memory:** below 500 MB for v1, using 500,000,000 bytes as the conservative ceiling. The original 80 MiB proposal is superseded. Include the desktop and any active test worker when assessing workload peaks.
+- **License:** MIT, copyright Jes Bak Hansen; see [LICENSE](LICENSE). Dependency review and notices are described in the README.
+- **Delivery:** an unsigned portable Windows ZIP, with no installer planned. Signing was declined for this single-user tool; it is not an outstanding v1 gate.
+- **Windows scope:** Narrator, IME, keyboard-only accessibility walkthroughs, corporate root certificates, and PAC/WPAD or authenticated enterprise proxies are outside v1 validation. AccessKit, native Windows TLS, and system-proxy support remain in the build but are uncertified for those uses.
+- **Owner acceptance:** Omnissa Horizon, 150%/200% display scale with monitor changes, post-reboot cold launch, and running the packaged ZIP on a machine without a toolchain were reported acceptable. These are owner judgements, not captured benchmark measurements. The OpenGL renderer remains selected.
 
-1. **Performance gate — closed.** Every target in the architecture's table passes. Warm launch p95 167 ms against 300 ms; a restored 1,000-request collection searchable p95 439 ms against 500 ms after first usable frame; idle CPU 0.0016% against 0.1%; frame construction under input p95 2.7 ms against a 16 ms input-to-paint budget, as a lower bound that excludes present; warm dispatch p95 0.62 ms against 5 ms; cold test worker p95 19 ms against 150 ms. The 32 MiB response delta budget holds for every shape measured — multi-line 3.8, single-line 25.0, gzipped 11.7, binary 4.1, over-cap 3.9 and slow-streaming 14.4 MiB. Idle private bytes are 94.0 MiB, above the proposal's 80 MiB but far inside the 500 MB v1 ceiling. **Cold launch was confirmed acceptable by the owner on 13 September 2026 after a reboot, but no figure was captured**, so it is an owner judgement rather than a measurement; the harness is in place if a number is ever wanted. An earlier report that restore missed was a measurement error, taken from process start rather than from first usable frame as the target specifies; PERFORMANCE.md records the correction.
-2. **Windows validation — closed**, at the scope the owner set on 13 September 2026 for a single-user tool. Out of scope for v1: Narrator, IME and keyboard-only walkthroughs; corporate root certificates; PAC/WPAD and authenticated enterprise proxies. Those code paths remain — `reqwest` still builds with `native-tls`, which reads the Windows certificate store, and with `system-proxy` — so behaviour on a managed network is uncertified rather than absent. In scope and confirmed by the owner: **Omnissa Horizon**, which was the real risk in choosing the OpenGL renderer, since a session without a 3D-capable driver can expose only the generic Windows OpenGL 1.1 implementation that egui cannot use — so `glow` stands and the wgpu alternative is not needed; and **150%/200% display scale with monitor changes**. Both are owner judgements rather than measurements. AccessKit remains enabled but uncertified.
-3. **OpenAPI completeness:** cross-origin remote reference acquisition, multipart and richer media handling, external example diagnostics, relative servers resolved against source identity, persisted sanitized source provenance, and reviewed reimport/update diffs. Relative and remote references work: referenced documents are fetched — sibling files for a file import, same-origin URLs for a URL import — inlined into the root and rebased, transitively, bounded at 50 documents and 20 MiB. Cross-origin fetches are refused because the spec's credentials would travel with them. Schema composition works: `allOf` merges every branch and the schema's own properties, and a `oneOf`/`anyOf` request body becomes one selectable candidate per branch in the import review instead of a blocker. Internal references, primitive parameters and scalar-item array styles work too; unsupported cases must remain blocked rather than guessed.
-4. **Editor polish — closed.** JSON and JavaScript syntax colouring and bracket pairing now work, alongside the line-number gutter, grouped collapsible folders with per-folder reordering, match navigation with highlighting, Ctrl+F for the focused editor, and Go to line from a failed assertion; editors also support normal selection, clipboard, indentation and undo/redo. F6 region traversal was dropped with accessibility. Colouring stops above 64 KiB: it turns one run of text into thousands of separately formatted sections, which measured 73 ms per frame for a megabyte against a 16 ms budget, so a larger page draws plain and says so.
-5. **Storage hardening:** lazy test/body loading for large collections — worth doing for memory, but measured at 28 ms of a 725 ms open, so it is not the restore bottleneck it was assumed to be; strict multi-process transaction locking. Focusing the window re-checks the collection's files and reports anything another program added, removed or modified, naming the request each path belongs to, with the choice of reloading or keeping the in-memory version; the same set is reported once rather than on every focus. Managed state works: the selected request, the environment and both split positions are restored when the same collection reopens, matched by name so another collection falls back to the first entry. Save-time conflict protection and recovery already work; a document written by a newer schema version is now refused at load rather than silently resaved, unknown extensions round-trip through save and reload including nested objects and arrays, and spool files abandoned by a crash are swept at startup. Deletion removes the manifest entry on Save and retains unreferenced files.
-6. **Transport polish:** virtual text pages — no longer needed for the memory budget, which page sizing closed; optional, and would have to restore drag-selection across a page; configurable connect timeout; proxy-secret binding; detailed safe source diagnostics; exact path-value encoding rules — **confirmed broken**: a path variable holding `a/b` silently becomes an extra segment, `a?b` truncates the path and turns the rest into a query, and `..` resolves the segment away, all without an error (SESSION_NOTES.md records the probe and the proposed fix); structured-query editing around opaque templates; invalid UTF-8/charset and binary preview options. A request in flight now reports bytes as they arrive — received, decoded separately when a compressed body differs, and a progress bar when the server declared a length. Whole-body find works: the raw view scans the entire body on a background thread in bounded chunks, cancelling a scan whose query has been replaced, and navigation loads the page holding a match and selects it. Unknown/stacked content encodings currently produce an explicit incomplete body error.
-7. **Packaging — closed.** The project is MIT licensed; dependency licenses were reviewed and all 254 linked crates are permissive, with the permissive option taken where a crate offers a choice. `scripts/package.ps1` produces `dist/Duckie-0.1.0-windows-x64.zip` carrying LICENSE and generated notices, and refuses to package a desktop binary still holding the screenshot or bench feature. The owner ran that ZIP on a machine with no toolchain on 13 September 2026 and confirmed it works. **The build stays unsigned**, decided by the owner the same day: a code-signing certificate is a recurring cost that buys nothing for a single-user tool, and a self-signed one would not quiet SmartScreen. Expect a SmartScreen prompt the first time a given build runs on a machine. No installer is planned; the portable ZIP is the delivery.
-## Deliberate preview choices
+## Validation snapshot
 
-- Save operates on all in-memory collection drafts. This avoids silently abandoning edits in unselected requests.
-- JSON/text content is stored in separate body files. Test sources are separate `.test.js` files. Collection opening currently loads them eagerly on a background job.
-- A redirected Location opens as a fresh GET draft with no inherited credentials. This is conservative even for same-origin navigation.
-- Test workers are not retained for 30 seconds. Immediate teardown keeps idle process count at zero while cold-worker overhead is measured.
-- No scenario runner, plugin marketplace, login, token refresh, cookie session, cloud sync, or automatic spec polling ships in this preview.
+The previous checkpoint at commit `fa0231c` recorded 64 passing tests, successful formatting and strict Clippy checks, and a matching `dist/Duckie-0.1.0-windows-x64.zip`. These are historical results from 13 September 2026, not verification of subsequent changes. Re-run relevant checks before claiming a newer build or package is validated.
+
+Path-value fix validated on 13 September 2026 in the working tree: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` passed (71 tests passed; four performance measurements intentionally ignored). Both Node-backed end-to-end tests passed. The release binaries and portable ZIP were not rebuilt or revalidated for this change.
+
+| Area | Recorded status | Remaining scope or qualification |
+| --- | --- | --- |
+| 1. Performance | Accepted for the agreed v1 scope | See PERFORMANCE.md. Cold launch has owner acceptance without a measured p95; CPU frame construction is only a lower bound on input-to-paint; reported GUI memory peaks exclude workers. |
+| 2. Windows validation | Accepted for the agreed v1 scope | Horizon and display-scale walkthroughs accepted; excluded enterprise/accessibility cases remain uncertified. |
+| 3. OpenAPI completeness | Open | Media handling, relative servers, source provenance, and reviewed reimport. |
+| 4. Editor polish | Accepted for the agreed v1 scope | Line numbers, syntax colours, bracket matching, grouped ordering, find navigation, and assertion-line navigation implemented. F6 traversal was dropped with accessibility. |
+| 5. Storage hardening | Open | Multi-process transaction locking and lazy body/test loading. |
+| 6. Transport polish | Partially complete | Path-value encoding fixed; charset/binary options and safe diagnostic detail remain. |
+| 7. Packaging | Accepted for the agreed v1 scope | MIT license and dependency review recorded; portable package accepted on a clean machine. Keep development features out of later packages. |
+
+## Implemented foundation
+
+- Eight Rust crates separate the model, storage, HTTP transport, OpenAPI import, assertion client/worker, orchestration, and native desktop UI.
+- Scratch and saved requests support custom methods, ordered duplicate query/header rows, namespaced interpolation, run bindings, bearer/API-key authentication, and redacted request summaries. Secrets are environment-scoped and separate from ordinary request files.
+- JSON/text, URL-encoded form, multipart fields/files, and streamed file bodies work with native Windows TLS, HTTP/1.1 and HTTP/2, proxy selection, timeout and cancellation. Requests have no automatic retries or redirect following.
+- Responses use bounded streaming decompression with separate encoded/decoded caps and a 2 MiB spill threshold. Preview pages adapt to long lines; at most three responses are retained. Raw-body find scans bounded chunks off the UI thread. Progress distinguishes received and decoded bytes.
+- Send captures immutable input. One active run includes automatic tests; responses publish before evaluation finishes, and tests can rerun without HTTP. Fresh QuickJS worker processes have engine limits, watchdogs and Windows job limits. Assertion errors identify `tests.js` lines separately from harness frames.
+- Collections use explicit saves, stable IDs, atomic replacement, recovery journals, content-hash conflict detection, focus-time external-change reporting, newer-schema rejection, and nested unknown-field roundtrips. Selection and split state restore per collection. Abandoned spool files are swept after 24 hours.
+- OpenAPI 3.0/3.1/3.2 JSON imports from local files or protected URLs into a review draft. Internal, relative local and same-origin remote references resolve transitively with rebasing, bounded at 50 documents and 20 MiB. Import handles examples, read-only omission, server precedence, security alternatives/combined requirements, `allOf` merges, and selectable `oneOf`/`anyOf` bodies.
+- Parameter serialization covers query `form`/`deepObject` objects and arrays, `spaceDelimited`/`pipeDelimited` arrays, and path `simple`/`label`/`matrix`, honoring supported `explode` combinations. Undefined forms such as arrays of objects remain blocked. URL path substitutions encode structural characters while preserving existing percent escapes and style punctuation; dot traversal segments are rejected before parsing.
+- The native UI includes dark/light/system themes, file dialogs, retained dirty drafts, grouped/collapsible folders and ordering, line-numbered editors, bounded syntax colouring, bracket matching, focused-editor find, and response snapshot labels. Editor undo buffers are not persisted.
+
+## Remaining work, in priority order
+
+### Tier B — correctness edges
+
+1. **Exact path-value encoding (area 6): completed 13 September 2026.** See the resolution and regression coverage below.
+2. **Charset and binary preview options (area 6).** Non-UTF-8 text is currently classified as binary and offered for saving. Unknown or stacked content encodings produce an incomplete-body error. Improve safe source diagnostics where current errors lack actionable detail.
+3. **Multi-process transaction locking (area 5).** Save-time content-hash checks already catch external changes; locking should coordinate the transaction itself across instances.
+
+### Tier C — import completeness (area 3)
+
+4. Multipart and richer request media handling.
+5. Relative server URLs resolved against source identity, including multi-file specs.
+6. Sanitized source provenance and reviewed reimport/update diffs that preserve local edits and tests.
+7. External example diagnostics.
+
+### Tier D — smaller follow-up
+
+8. **Lazy test/body loading (area 5).** Investigate for memory savings on large collections. Earlier profiling attributed only 28 ms of a 725 ms open to this work; do not claim it is the restore bottleneck without new measurements.
+
+### Deferred or excluded from v1
+
+Cross-origin reference fetching is refused under the current credential-forwarding policy; reconsider only with explicit origin selection and credential isolation. Virtualized text pages were dropped after adaptive page sizing met the response-memory delta target and to preserve drag-selection across a page. Configurable connect timeout, proxy-secret bindings, structured-query editing around opaque templates, and F6 traversal are also outside the agreed remaining work.
+
+Scenario execution, plugin marketplace, login, token refresh, shared cookie sessions, cloud sync, and automatic spec polling remain outside v1.
+
+## Resolved: path values can change URL structure
+
+The prior checkpoint reported these results when substituting into `https://api.test/items/{{request.id}}/detail`:
+
+| Value | Observed result | Consequence |
+| --- | --- | --- |
+| `a/b` | `/items/a/b/detail` | Adds a path segment. |
+| `a?b` | `/items/a?b/detail` | Starts a query; path truncates to `/items/a`. |
+| `..` | `/detail` | Removes the preceding segment. |
+| `a#b` | Rejected | Existing fragment guard catches it. |
+| `a b`, `ü` | `%20`, `%C3%BC` | Already encoded correctly. |
+| `a%2Fb` | Preserved | Existing pre-encoded values must continue to work. |
+
+The first three cases previously sent a different request without an error. Regression coverage now verifies slash/question/hash/backslash encoding and rejection of dot traversal before transport, including exact HTTP request targets received by a loopback server.
+
+`prepare` now determines substitution position after expanding preceding URL parts. Path values are encoded regardless of namespace; base URL and authority substitutions remain supported. Query, header, and body interpolation retain their previous behavior. Existing percent escapes and OpenAPI label/matrix punctuation are preserved. Import-to-prepare regressions cover simple, label, and matrix styles.
+
+The URL parser does normalize percent-encoded dot segments. Encoding dots therefore cannot preserve them safely: complete `.` and `..` path segments are rejected, including literal, encoded, and composed forms. This also applies to literal URLs and base URL values. Path value whitespace and control bytes are encoded rather than silently stripped. These checks concern the URL Duckie sends; server-side decoding behavior remains server-defined.
+
+URLs must start with `http://` or `https://` (case-insensitive). Parser shorthand such as `https:host/path` is rejected so it cannot bypass path-position checks.
+
+## Implementation cautions
+
+- **Save covers the collection.** All dirty drafts save together. Reordering changes the manifest and must mark it dirty even if no request content changed. Deletion removes the manifest entry on Save but retains unreferenced files. Body/test files currently load eagerly on a background job.
+- **The 24-hour spool threshold protects other instances.** Windows permits deletion of files opened with `FILE_SHARE_DELETE`; a file can still be in use by another Duckie instance. Do not shorten the threshold without a replacement ownership guard.
+- **Raw and Pretty searches have different offsets.** Raw find scans retained body bytes; Pretty is a reformatted copy, so its search remains page-local and labelled accordingly.
+- **Reference rebasing is essential.** An external document's internal `#/components/...` references must point into its embedded copy after inlining, rather than the root document's components. `as_url` also distinguishes Windows drive paths from URL schemes.
+- **Serialization order is deterministic.** `serde_json` sorts object members; no supported parameter style relies on authored object-key order.
+- **Syntax colouring is capped at 64 KiB** by `editor::MAX_COLOURED`. Larger text draws plain. A performance fixture must have the correct content type to exercise colouring; see PERFORMANCE.md for the measurements and baseline rules.
+- **Egui 0.36 APIs differ from older versions.** Use `App::ui`, `Panel::top/left/bottom`, and `Context::run_ui`. Headless tests must clear unapplied `output.textures_delta`. `TextEdit::show` yields an `AtomLayoutResponse`; its inner response is `output.response.response`.
+- **Development dependencies are explicit.** The two end-to-end tests and fixture generator require Node.js on `PATH` and fail rather than silently skipping. The icon script needs PowerShell's unary comma when returning an array; preserve it when editing. Prefer structured patches to shell-generated source that can corrupt escapes.
+- **Development features must not ship.** Screenshot variables (`DUCKIE_CAPTURE_PATH`, `DUCKIE_CAPTURE_THEME`, `DUCKIE_CAPTURE_VIEW`) and `DUCKIE_BENCH_PATH` belong to development builds. Packaging rejects binaries containing the capture/bench markers. Rebuild without those features before packaging.
+- **Fresh workers are intentional.** Each test evaluation starts and stops its worker instead of retaining it for 30 seconds. Redirect navigation also intentionally creates a fresh GET draft without inherited credentials.

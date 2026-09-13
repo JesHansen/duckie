@@ -1,6 +1,6 @@
 # Duckie UI design proposal
 
-Status: proposed design, 13 September 2026. These wireframes describe behavior and layout; they are not screenshots of an implemented application. Companion document: [Architecture proposal](ARCHITECTURE.md).
+Original proposal, 13 September 2026. These wireframes describe the proposed behavior and layout, not screenshots or a statement of current feature coverage. See [current owner decisions and implementation status](IMPLEMENTATION_STATUS.md) for later changes and accepted scope. Companion document: [Architecture proposal](ARCHITECTURE.md).
 
 ## 1. Design intent
 

@@ -1,6 +1,6 @@
 # Duckie architecture proposal
 
-Status: proposed design, 13 September 2026. No application has been implemented or benchmarked yet. Companion document: [UI design](UI_DESIGN.md).
+Original proposal, 13 September 2026, written before implementation and benchmarking. The proposal below is retained as design context; [current owner decisions and implementation status](IMPLEMENTATION_STATUS.md) supersede conflicting proposals, including the original memory budget and validation scope. Actual measurements live in [PERFORMANCE.md](PERFORMANCE.md). Companion document: [UI design](UI_DESIGN.md).
 
 ## 1. Product contract
 

@@ -280,6 +280,166 @@ pub fn interpolate(
     out.push_str(remaining);
     Ok(out)
 }
+
+fn path_value(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        // Keep an already encoded byte intact. This is needed for values imported from an
+        // OpenAPI document, and means %2F remains a data slash rather than a path separator.
+        if byte == b'%'
+            && at + 2 < bytes.len()
+            && bytes[at + 1].is_ascii_hexdigit()
+            && bytes[at + 2].is_ascii_hexdigit()
+        {
+            out.push('%');
+            out.push(bytes[at + 1] as char);
+            out.push(bytes[at + 2] as char);
+            at += 3;
+            continue;
+        }
+        // RFC 3986 path characters, including punctuation used by OpenAPI label and matrix
+        // serializations. Delimiters which alter URL structure are deliberately excluded.
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            )
+        {
+            out.push(byte as char);
+        } else {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            out.push('%');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        at += 1;
+    }
+    out
+}
+
+/// Returns whether the next interpolation occurs in the path of a complete URL. A complete
+/// prefix is important: `https://{{env.host}}` is still authority interpolation, whereas
+/// `{{env.baseUrl}}/items/{{request.id}}` becomes path interpolation after `baseUrl` resolves.
+fn interpolation_is_in_path(prefix: &str) -> bool {
+    let Ok(url) = url::Url::parse(prefix) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return false;
+    }
+    let Some(authority) = prefix.find("://").map(|at| at + 3) else {
+        return false;
+    };
+    let rest = &prefix[authority..];
+    if rest.contains(['?', '#']) {
+        return false;
+    }
+    // The WHATWG parser accepts a backslash as a special-scheme path separator.
+    rest.contains(['/', '\\'])
+}
+
+fn resolve_url(
+    input: &str,
+    request: &Values,
+    env: &EnvironmentSnapshot,
+    bindings: &RunBindings,
+) -> Result<String> {
+    let mut remaining = input;
+    let mut out = String::new();
+    while let Some(start) = remaining.find("{{") {
+        out.push_str(&remaining[..start]);
+        let end = remaining[start + 2..]
+            .find("}}")
+            .ok_or_else(|| anyhow::anyhow!("Unclosed variable reference"))?
+            + start
+            + 2;
+        let key = remaining[start + 2..end].trim();
+        let (ns, name) = key
+            .split_once('.')
+            .ok_or_else(|| anyhow::anyhow!("Use env, request, or secret namespace"))?;
+        let value = match ns {
+            "env" => env.values.get(name),
+            "request" => bindings.0.get(name).or_else(|| request.get(name)),
+            "secret" => env.secrets.get(name),
+            _ => None,
+        }
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("No value for {key} in {}", env.name))?;
+        if interpolation_is_in_path(&out) {
+            out.push_str(&path_value(value));
+        } else {
+            out.push_str(value);
+        }
+        remaining = &remaining[end + 2..];
+    }
+    out.push_str(remaining);
+    Ok(out)
+}
+
+fn has_dot_path_segment(raw_url: &str) -> bool {
+    let raw_url = raw_url.trim_matches(|c: char| c <= '\u{20}');
+    let Some(after_scheme) = raw_url.find("://").map(|at| at + 3) else {
+        return false;
+    };
+    let rest = &raw_url[after_scheme..];
+    let path_start = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    if path_start == rest.len() || !matches!(rest.as_bytes()[path_start], b'/' | b'\\') {
+        return false;
+    }
+    let path = &rest[path_start..];
+    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+    // url::Url treats backslash as a separator for HTTP(S), and strips these ASCII controls
+    // before resolving dot segments. Mirror only those normalizations for the safety check.
+    let path = path.replace('\\', "/").replace(['\t', '\n', '\r'], "");
+    path.split('/').any(|segment| {
+        let bytes = segment.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'%'
+                && at + 2 < bytes.len()
+                && bytes[at + 1].is_ascii_hexdigit()
+                && bytes[at + 2].is_ascii_hexdigit()
+            {
+                decoded.push(
+                    (bytes[at + 1] as char).to_digit(16).unwrap() as u8 * 16
+                        + (bytes[at + 2] as char).to_digit(16).unwrap() as u8,
+                );
+                at += 3;
+            } else {
+                decoded.push(bytes[at]);
+                at += 1;
+            }
+        }
+        matches!(decoded.as_slice(), b"." | b"..")
+    })
+}
+
+fn has_canonical_http_authority(url: &str) -> bool {
+    url.get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || url
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestSummary {
@@ -327,7 +487,15 @@ pub fn prepare(
         bail!("Response limits must be between 1 byte and 1 GiB");
     }
     let resolve = |s: &str| interpolate(s, &req.variables, env, bindings);
-    let base = resolve(&req.url)?;
+    let base = resolve_url(&req.url, &req.variables, env, bindings)?;
+    if !has_canonical_http_authority(&base) {
+        bail!("Enter a canonical absolute HTTP(S) URL starting with http:// or https://");
+    }
+    // url::Url normalizes literal and percent-encoded dot segments. Refuse them before parsing
+    // so a template cannot silently send a different path.
+    if has_dot_path_segment(&base) {
+        bail!("URL path cannot contain a dot traversal segment");
+    }
     let mut parsed = url::Url::parse(&base)
         .map_err(|_| anyhow::anyhow!("Enter a valid absolute HTTP(S) URL"))?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
@@ -698,6 +866,179 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.url, r.address());
+    }
+    #[test]
+    fn url_path_substitutions_are_encoded_without_changing_other_components() {
+        let mut r = RequestDefinition {
+            url: "https://example.test/items/{{request.id}}/detail?kept={{request.query}}".into(),
+            ..Default::default()
+        };
+        r.variables.insert("id".into(), "a/b?c#d\\e\tü".into());
+        r.variables.insert("query".into(), "a/b?c".into());
+        let p = prepare(
+            &r,
+            &EnvironmentSnapshot::default(),
+            &RunBindings::default(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            p.url,
+            "https://example.test/items/a%2Fb%3Fc%23d%5Ce%09%C3%BC/detail?kept=a/b?c"
+        );
+
+        r.url = "https://example.test/items/{{request.id}}".into();
+        r.variables.insert("id".into(), ".a,b;c=d".into());
+        assert_eq!(
+            prepare(
+                &r,
+                &EnvironmentSnapshot::default(),
+                &RunBindings::default(),
+                1
+            )
+            .unwrap()
+            .url,
+            "https://example.test/items/.a,b;c=d"
+        );
+    }
+    #[test]
+    fn base_url_templates_establish_path_position_for_every_namespace() {
+        for namespace in ["env", "request", "secret"] {
+            let mut r = RequestDefinition {
+                url: format!("{{{{{namespace}.base}}}}/prefix/{{{{request.id}}}}"),
+                ..Default::default()
+            };
+            r.variables.insert("id".into(), "a/b".into());
+            let mut e = EnvironmentSnapshot::default();
+            match namespace {
+                "env" => {
+                    e.values
+                        .insert("base".into(), "https://example.test".into());
+                }
+                "request" => {
+                    r.variables
+                        .insert("base".into(), "https://example.test".into());
+                }
+                "secret" => {
+                    e.secrets
+                        .insert("base".into(), "https://example.test".into());
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                prepare(&r, &e, &RunBindings::default(), 1).unwrap().url,
+                "https://example.test/prefix/a%2Fb",
+                "{namespace}"
+            );
+        }
+    }
+    #[test]
+    fn dot_segments_are_rejected_before_url_normalizes_them() {
+        let mut r = RequestDefinition {
+            url: "https://example.test/items/{{request.id}}/detail".into(),
+            ..Default::default()
+        };
+        for value in [".", "..", "%2e", "%2E%2e"] {
+            r.variables.insert("id".into(), value.into());
+            assert!(
+                prepare(
+                    &r,
+                    &EnvironmentSnapshot::default(),
+                    &RunBindings::default(),
+                    1
+                )
+                .is_err()
+            );
+        }
+        r.url = "https://example.test/items/.{{request.id}}/detail".into();
+        r.variables.insert("id".into(), ".".into());
+        assert!(
+            prepare(
+                &r,
+                &EnvironmentSnapshot::default(),
+                &RunBindings::default(),
+                1
+            )
+            .is_err()
+        );
+        r.url = "https://example.test/items/%2e%2e/detail".into();
+        assert!(
+            prepare(
+                &r,
+                &EnvironmentSnapshot::default(),
+                &RunBindings::default(),
+                1
+            )
+            .is_err()
+        );
+        r.url = "https://example.test/items/.\t./detail".into();
+        assert!(
+            prepare(
+                &r,
+                &EnvironmentSnapshot::default(),
+                &RunBindings::default(),
+                1
+            )
+            .is_err()
+        );
+        r.url = "https://example.test\\items\\{{request.id}}".into();
+        r.variables.insert("id".into(), "..".into());
+        assert!(
+            prepare(
+                &r,
+                &EnvironmentSnapshot::default(),
+                &RunBindings::default(),
+                1
+            )
+            .is_err()
+        );
+        r.url = "https://example.test/items/.. \t".into();
+        assert!(
+            prepare(
+                &r,
+                &EnvironmentSnapshot::default(),
+                &RunBindings::default(),
+                1
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn noncanonical_http_syntax_cannot_bypass_path_safety() {
+        let mut r = RequestDefinition {
+            url: "https:example.test/items/{{request.id}}".into(),
+            ..Default::default()
+        };
+        r.variables.insert("id".into(), "a/b".into());
+        for url in [
+            "https:example.test/items/{{request.id}}",
+            "https:\\example.test\\items\\{{request.id}}",
+            "\thttps://example.test/items/{{request.id}}",
+        ] {
+            r.url = url.into();
+            assert!(
+                prepare(
+                    &r,
+                    &EnvironmentSnapshot::default(),
+                    &RunBindings::default(),
+                    1
+                )
+                .is_err(),
+                "{url}"
+            );
+        }
+        r.url = "HTTPS://example.test/items/{{request.id}}".into();
+        assert_eq!(
+            prepare(
+                &r,
+                &EnvironmentSnapshot::default(),
+                &RunBindings::default(),
+                1
+            )
+            .unwrap()
+            .url,
+            "https://example.test/items/a%2Fb"
+        );
     }
     #[test]
     fn substitution_is_one_pass_and_bindings_cannot_override_secrets() {

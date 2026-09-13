@@ -2,9 +2,9 @@
 
 ## V1 budget
 
-On 13 September 2026 the owner changed the v1 memory requirement to **below 500 MB**. Use 500,000,000 bytes as the conservative ceiling. The proposal's 80 MiB figure is superseded for v1. Account for the desktop and any active test worker when validating workload peaks.
+The [current owner decisions](IMPLEMENTATION_STATUS.md#owner-decisions-and-accepted-scope) set the v1 memory ceiling at **below 500 MB** (500,000,000 bytes), superseding the proposal's 80 MiB figure. Account for the desktop and any active test worker when validating workload peaks.
 
-Targets below are the release gates proposed in ARCHITECTURE.md. Where a measurement misses, it is recorded as a miss, not relaxed.
+Targets below come from [ARCHITECTURE.md](ARCHITECTURE.md#9-performance-acceptance-targets), with later owner decisions taking precedence. Owner acceptance is distinct from measured coverage: a CPU-only frame measurement or an unrecorded cold-launch walkthrough does not prove every original target passes.
 
 ## Measurement setup
 
@@ -20,6 +20,8 @@ cargo test -p duckie-test-worker --release --test measurements -- --ignored --no
 cargo test -p duckie-desktop --release -- --ignored --nocapture      # frame construction
 ```
 
+The fixture generator creates deterministic 1,000- and 10,000-request collections and a 10+ MiB OpenAPI document under the gitignored `fixtures/` directory. Reuse byte-identical fixtures for before/after comparisons. Measure each target from the baseline it names; collection restore is timed after the first usable frame, not from process start.
+
 ## Results, 13 September 2026
 
 | Measurement | Target | Measured | |
@@ -29,7 +31,7 @@ cargo test -p duckie-desktop --release -- --ignored --nocapture      # frame con
 | Restored 1,000-request collection searchable, 20 trials | p95 ≤ 500 ms **after first usable frame** | p95 **439 ms** (min 339, median 413) | pass |
 | Idle private bytes, empty workspace, no retained response | ≤ 80 MiB proposed; 500 MB v1 ceiling | **94.0 MiB** (working set 64.5 MiB) | over proposal, well inside v1 |
 | Idle CPU, 60 s sampled after 30 s without input | ≤ 0.1% of machine | **0.0016%** | pass |
-| Frame construction under input, 1,000 requests and a coloured 64 KiB response | p95 input-to-paint ≤ 16 ms | p95 **7.0 ms** (median 6.4) | pass as a lower bound, see below |
+| Frame construction under input, 1,000 requests and a coloured 64 KiB response | p95 input-to-paint ≤ 16 ms | p95 **7.0 ms** (median 6.4) | CPU portion measured; full target not measured |
 | Warm local request dispatch | p95 ≤ 5 ms | p95 **0.62 ms**, including a loopback round trip | pass |
 | Cold test worker overhead, 1 KiB response, trivial test | p95 ≤ 150 ms | p95 **19 ms** (median 15) | pass |
 | 50 MiB response, every shape below | ≤ 32 MiB over settled baseline | **3.8–25.0 MiB** | pass |
@@ -77,7 +79,7 @@ The preview page is now sized to its content — under 4 KiB per line keeps the 
 
 ### What the frame number does and does not include
 
-Frame construction is CPU time to produce a frame, measured headlessly with a keystroke on every other frame, a 1,000-request sidebar, and a syntax-coloured response with an active find. The size is the worst case that still colours, just under the 64 KiB cap; a 1 MiB page draws plain and costs 3.6 ms. Colouring is what makes the difference — the same megabyte cost 73 ms per frame when coloured, which is why the cap exists: 25 KiB measured 3.7 ms, 50 KiB 7.2 ms, 100 KiB 12.9 ms and 200 KiB 28.6 ms. It excludes texture upload, present and the compositor, so it is a lower bound on input-to-paint rather than the thing the target names. At p95 2.7 ms it leaves roughly 13 ms of headroom inside a 16 ms budget. The 20.9 ms maximum is the first frame, which builds the font atlas.
+Frame construction is CPU time to produce a frame, measured headlessly with a keystroke on every other frame, a 1,000-request sidebar, and a syntax-coloured response with an active find. The size is the worst case that still colours, just under the 64 KiB cap; a 1 MiB page draws plain and costs 3.6 ms. Colouring is what makes the difference — the same megabyte cost 73 ms per frame when coloured, which is why the cap exists: 25 KiB measured 3.7 ms, 50 KiB 7.2 ms, 100 KiB 12.9 ms and 200 KiB 28.6 ms. It excludes texture upload, present and the compositor, so the reported p95 7.0 ms is a lower bound on input-to-paint, not proof that the full 16 ms target passes. The notes also report a 20.9 ms maximum attributed to first-frame font-atlas construction.
 
 ## Renderer selection
 
