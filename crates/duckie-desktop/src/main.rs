@@ -6,10 +6,30 @@ mod editor;
 mod state;
 mod ui;
 
+/// Straight-alpha pixels for the window icon, which is what the taskbar shows while Duckie runs.
+/// A pinned shortcut uses the icon the build script compiled into the executable instead.
+///
+/// Kept as raw pixels rather than a PNG so the binary needs no image decoder at startup; the size
+/// is fixed by `scripts/make-icon.ps1`, and asserted here so the two cannot drift apart.
+fn window_icon() -> eframe::egui::IconData {
+    const SIDE: usize = 128;
+    let rgba = include_bytes!("../../../assets/window-icon.rgba");
+    assert_eq!(
+        rgba.len(),
+        SIDE * SIDE * 4,
+        "window-icon.rgba is not 128x128"
+    );
+    eframe::egui::IconData {
+        rgba: rgba.to_vec(),
+        width: SIDE as u32,
+        height: SIDE as u32,
+    }
+}
 fn main() {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Duckie")
+            .with_icon(window_icon())
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([900.0, 600.0]),
         renderer: eframe::Renderer::Glow,
