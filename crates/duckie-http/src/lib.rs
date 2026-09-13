@@ -63,6 +63,16 @@ impl HttpEngine {
         request: PreparedRequest,
         cancel: CancellationToken,
     ) -> Result<ExecutionResult> {
+        self.execute_watched(request, cancel, Progress::default())
+            .await
+    }
+    /// As `execute`, but reporting bytes as they arrive so a long download can be shown moving.
+    pub async fn execute_watched(
+        &self,
+        request: PreparedRequest,
+        cancel: CancellationToken,
+        progress: Progress,
+    ) -> Result<ExecutionResult> {
         let client = self.client(&request.proxy)?;
         let method = reqwest::Method::from_bytes(request.method.as_bytes())
             .context("Invalid HTTP method")?;
@@ -178,12 +188,16 @@ impl HttpEngine {
                 .unwrap_or("")
                 .trim()
                 .to_ascii_lowercase();
-            let counter = Arc::new(AtomicU64::new(0));
+            // A declared length is of the encoded body, so it pairs with the encoded counter.
+            progress
+                .0
+                .total
+                .store(response.content_length().unwrap_or(0), Ordering::Relaxed);
             let limit_hit = Arc::new(AtomicBool::new(false));
             let stream = response.bytes_stream().map_err(io::Error::other);
             let reader = LimitedReader {
                 inner: StreamReader::new(stream),
-                count: counter.clone(),
+                count: progress.clone(),
                 hit: limit_hit.clone(),
                 limit: request.encoded_limit,
             };
@@ -217,6 +231,7 @@ impl HttpEngine {
                     Some(Ok(n)) => {
                         let keep = (n as u64).min(remaining) as usize;
                         capture.write(&chunk[..keep]).await?;
+                        progress.0.decoded.store(capture.len, Ordering::Relaxed);
                         if n > keep {
                             result.outcome = Outcome::DecodedLimit;
                         }
@@ -231,7 +246,7 @@ impl HttpEngine {
                     None => break,
                 }
             }
-            result.encoded_bytes = counter.load(Ordering::Relaxed);
+            result.encoded_bytes = progress.encoded();
             result.body = capture.finish().await?;
         }
         result.duration_ms = started.elapsed().as_millis() as u64;
@@ -257,7 +272,8 @@ fn classify(error: &reqwest::Error) -> Outcome {
 }
 struct LimitedReader<R> {
     inner: R,
-    count: Arc<AtomicU64>,
+    /// Counts encoded bytes, and is the same handle the caller watches for progress.
+    count: Progress,
     hit: Arc<AtomicBool>,
     limit: u64,
 }
@@ -271,9 +287,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for LimitedReader<R> {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        let remaining = this
-            .limit
-            .saturating_sub(this.count.load(Ordering::Relaxed));
+        let remaining = this.limit.saturating_sub(this.count.encoded());
         if remaining == 0 {
             let mut probe = [0u8; 1];
             let mut probe_buf = ReadBuf::new(&mut probe);
@@ -291,7 +305,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for LimitedReader<R> {
                 Poll::Ready(Ok(())) => {
                     let n = limited.filled().len();
                     buf.advance(n);
-                    this.count.fetch_add(n as u64, Ordering::Relaxed);
+                    this.count.0.encoded.fetch_add(n as u64, Ordering::Relaxed);
                     Poll::Ready(Ok(()))
                 }
                 other => other,
@@ -342,6 +356,32 @@ fn sweep_dir(root: &std::path::Path) -> io::Result<u64> {
         }
     }
     Ok(reclaimed)
+}
+/// Bytes seen so far on a response body, shared with whoever started the request.
+///
+/// Cloning shares one set of counters; the reader updates them as chunks arrive and the caller
+/// reads them from another thread, so both sides use relaxed atomics and neither blocks.
+#[derive(Clone, Default)]
+pub struct Progress(Arc<Counters>);
+#[derive(Default)]
+struct Counters {
+    encoded: AtomicU64,
+    decoded: AtomicU64,
+    total: AtomicU64,
+}
+impl Progress {
+    /// Bytes received on the wire, before any content decoding.
+    pub fn encoded(&self) -> u64 {
+        self.0.encoded.load(Ordering::Relaxed)
+    }
+    /// Bytes after decoding, which is what the response will hold.
+    pub fn decoded(&self) -> u64 {
+        self.0.decoded.load(Ordering::Relaxed)
+    }
+    /// The declared encoded length, or zero when the server did not give one.
+    pub fn total(&self) -> u64 {
+        self.0.total.load(Ordering::Relaxed)
+    }
 }
 struct Capture {
     memory: Vec<u8>,
@@ -417,6 +457,33 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+    #[tokio::test]
+    async fn progress_counts_bytes_and_records_a_declared_length() {
+        const SIZE: usize = 300_000;
+        let mut response =
+            format!("HTTP/1.1 200 OK\r\ncontent-length: {SIZE}\r\n\r\n").into_bytes();
+        response.extend(std::iter::repeat_n(b'x', SIZE));
+        let url = server(response).await;
+        let progress = Progress::default();
+        // Before anything arrives the counters read zero rather than something invented.
+        assert_eq!(
+            (progress.encoded(), progress.decoded(), progress.total()),
+            (0, 0, 0)
+        );
+        let result = HttpEngine::default()
+            .execute_watched(prepared(url), CancellationToken::new(), progress.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::Complete);
+        assert_eq!(progress.encoded(), SIZE as u64);
+        assert_eq!(progress.decoded(), SIZE as u64);
+        assert_eq!(
+            progress.total(),
+            SIZE as u64,
+            "the declared length is reported"
+        );
+        assert_eq!(progress.encoded(), result.encoded_bytes);
     }
     #[tokio::test]
     async fn error_status_is_complete_and_duplicate_headers_survive() {

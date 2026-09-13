@@ -63,19 +63,21 @@ impl ExecutionService {
         source: String,
         auto_test: bool,
         environment: Values,
-    ) -> Result<CancellationToken> {
+    ) -> Result<(CancellationToken, duckie_http::Progress)> {
         if self.busy.swap(true, Ordering::AcqRel) {
             bail!("A request or test evaluation is already running");
         }
         let cancel = CancellationToken::new();
         let token = cancel.clone();
+        let progress = duckie_http::Progress::default();
+        let watched = progress.clone();
         let http = self.http.clone();
         let sender = self.sender.clone();
         let wake = self.wake.clone();
         let busy = self.busy.clone();
         self.runtime.spawn(async move {
             let request_id = request.id.clone();
-            match http.execute(request, token.clone()).await {
+            match http.execute_watched(request, token.clone(), watched).await {
                 Ok(result) => {
                     let evaluate = auto_test
                         && !source.trim().is_empty()
@@ -124,7 +126,7 @@ impl ExecutionService {
             let _ = sender.send(RunEvent::Finished).await;
             wake();
         });
-        Ok(cancel)
+        Ok((cancel, progress))
     }
     pub fn rerun_tests(
         &self,

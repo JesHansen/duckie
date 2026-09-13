@@ -176,7 +176,9 @@ pub struct Duckie {
     pub prefs: Preferences,
     pub status: String,
     pub io_busy: bool,
-    pub active: Option<(String, CancellationToken, Instant)>,
+    /// The request in flight: its id, how to stop it, when it started, and the byte counters the
+    /// transport updates as the body arrives.
+    pub active: Option<(String, CancellationToken, Instant, duckie_http::Progress)>,
     pub active_environment: Values,
     pub active_testing: bool,
     pub env_dialog: bool,
@@ -402,8 +404,8 @@ impl Duckie {
             )
         });
         match result {
-            Ok(token) => {
-                self.active = Some((d.request.id.clone(), token, Instant::now()));
+            Ok((token, progress)) => {
+                self.active = Some((d.request.id.clone(), token, Instant::now(), progress));
                 self.active_environment = env.values;
                 self.active_testing = false;
                 self.drafts[self.selected].error.clear();
@@ -427,7 +429,13 @@ impl Duckie {
             view.environment.clone(),
         ) {
             Ok(token) => {
-                self.active = Some((d.request.id.clone(), token, Instant::now()));
+                self.active = Some((
+                    d.request.id.clone(),
+                    token,
+                    Instant::now(),
+                    // A rerun sends nothing, so these counters stay at zero and show no bytes.
+                    duckie_http::Progress::default(),
+                ));
                 self.active_testing = true;
                 self.response_tab = ResponseTab::Tests;
             }

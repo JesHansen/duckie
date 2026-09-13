@@ -285,7 +285,7 @@ impl Duckie {
                 if let Some(token) = import.cancel {
                     token.cancel();
                 }
-            } else if let Some((_, token, _)) = &self.active {
+            } else if let Some((_, token, ..)) = &self.active {
                 token.cancel();
             }
         }
@@ -578,7 +578,7 @@ impl Duckie {
                 field.request_focus();
                 self.focus_url = false;
             }
-            if let Some((id, _, _)) = &self.active {
+            if let Some((id, ..)) = &self.active {
                 if id == &d.request.id {
                     cancel = ui
                         .add_sized(
@@ -616,7 +616,7 @@ impl Duckie {
         if send {
             self.send();
         }
-        if cancel && let Some((_, token, _)) = &self.active {
+        if cancel && let Some((_, token, ..)) = &self.active {
             token.cancel();
         }
         if !self.drafts[self.selected].error.is_empty() {
@@ -1071,7 +1071,7 @@ impl Duckie {
                 format!("Response from {}", view.result.summary.environment),
             );
         }
-        if self.active.as_ref().is_some_and(|(r, _, _)| r == &id) {
+        if self.active.as_ref().is_some_and(|(r, ..)| r == &id) {
             ui.weak(if self.active_testing {
                 "Tests running…"
             } else {
@@ -1481,7 +1481,7 @@ impl eframe::App for Duckie {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.active.is_some() {
-                if let Some((_, token, _)) = &self.active {
+                if let Some((_, token, ..)) = &self.active {
                     token.cancel();
                 }
                 self.status = "Stopping active run. Close again when it finishes.".into();
@@ -1506,7 +1506,7 @@ impl eframe::App for Duckie {
                 ui.add(egui::Label::new(RichText::new(&self.status).size(12.0)).truncate());
             });
         });
-        if let Some((id, _, started)) = &self.active {
+        if let Some((id, _, started, progress)) = &self.active {
             let name = self
                 .drafts
                 .iter()
@@ -1514,16 +1514,36 @@ impl eframe::App for Duckie {
                 .map(|d| d.request.name.clone())
                 .unwrap_or_default();
             let elapsed = started.elapsed().as_secs_f32();
+            // Encoded bytes are what actually arrived; decoded is what the response will hold, and
+            // the two differ enough on a compressed body to be worth showing separately.
+            let (received, decoded, total) =
+                (progress.encoded(), progress.decoded(), progress.total());
+            let transferred = if received == 0 {
+                String::new()
+            } else if total > received {
+                format!(" · {} of {}", size(received), size(total))
+            } else if decoded > received {
+                format!(" · {} received, {} decoded", size(received), size(decoded))
+            } else {
+                format!(" · {} received", size(received))
+            };
             egui::Panel::top("active-run").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!(
-                        "{} · {name} · {elapsed:.1}s",
+                        "{} · {name} · {elapsed:.1}s{transferred}",
                         if self.active_testing {
                             "Testing"
                         } else {
                             "Sending"
                         }
                     ));
+                    // A declared length gives a real bar; without one the byte count is all there is.
+                    if total > 0 && received < total {
+                        ui.add(
+                            egui::ProgressBar::new(received as f32 / total as f32)
+                                .desired_width(140.0),
+                        );
+                    }
                     if ui
                         .small_button(if self.active_testing {
                             "Stop tests"
@@ -1531,7 +1551,7 @@ impl eframe::App for Duckie {
                             "Cancel"
                         })
                         .clicked()
-                        && let Some((_, token, _)) = &self.active
+                        && let Some((_, token, ..)) = &self.active
                     {
                         token.cancel();
                     }
@@ -1617,7 +1637,7 @@ impl eframe::App for Duckie {
         false
     } // Text editor undo stacks can contain credentials.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Some((_, token, _)) = &self.active {
+        if let Some((_, token, ..)) = &self.active {
             token.cancel();
         }
     }

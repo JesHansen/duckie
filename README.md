@@ -61,6 +61,8 @@ test("returns a successful response", () => {
 
 A failure reports the assertion message above the stack, and your test file evaluates as `tests.js` so its frames are distinguishable from the harness's. **Test results** turns the first `tests.js` frame into a **Go to line** button that selects that line in the Tests editor.
 
+While a request is in flight the bar above the request shows elapsed time and bytes received, with a progress bar when the server declared a content length. A compressed body reports received and decoded separately, since those differ. Cancel stops it at any point.
+
 **Run tests / Ctrl+Shift+Enter** evaluates current source against the retained response without another HTTP request. One run, including tests, occupies the app's run slot. Test code runs in a fresh native worker process with a 2-second engine deadline, 64 MiB JS heap, 512 KiB stack, a parent watchdog, and a Windows Job Object with a 128 MiB process-memory cap. No filesystem, network, module loader, or Node.js API is exposed. Async callbacks are unsupported. Process isolation is not an OS security sandbox.
 
 ## Verify
