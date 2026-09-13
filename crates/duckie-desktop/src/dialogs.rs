@@ -174,6 +174,9 @@ impl Duckie {
                 self.delete = None;
             }
         }
+        if !self.disk_changes.is_empty() {
+            self.disk_dialog(ctx);
+        }
         if self.about {
             egui::Window::new("About Duckie").open(&mut self.about).resizable(false).show(ctx,|ui|{
             ui.heading("Duckie 0.1.0");ui.label("A small, local HTTP workbench for Windows.");ui.separator();
@@ -181,6 +184,86 @@ impl Duckie {
             ui.separator();ui.label("First development preview. See README.md and IMPLEMENTATION_STATUS.md for coverage and release gates.");
         });
         }
+    }
+    /// Reports files another program changed under the collection, and offers the only two
+    /// honest choices: take what is on disk, or keep the in-memory version and deal with it at
+    /// save time, where the same hashes block an overwrite.
+    fn disk_dialog(&mut self, ctx: &egui::Context) {
+        let dirty = self.drafts.iter().any(|d| d.dirty) || self.env_dirty;
+        let mut choice = 0;
+        let mut open = true;
+        egui::Window::new("Changed on disk")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{} file(s) under this collection changed outside Duckie.",
+                    self.disk_changes.len()
+                ));
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .max_height(240.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("disk-changes")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (path, change) in &self.disk_changes {
+                                    ui.label(match change {
+                                        duckie_storage::Change::Added => "Added",
+                                        duckie_storage::Change::Removed => "Removed",
+                                        duckie_storage::Change::Modified => "Modified",
+                                    });
+                                    ui.label(egui::RichText::new(path).monospace());
+                                    // File names are ids, so name the request a path belongs to.
+                                    ui.weak(self.request_named(path).unwrap_or_default());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.add_space(8.0);
+                if dirty {
+                    ui.colored_label(
+                        crate::ui::warning(ui),
+                        "You have unsaved changes. Reloading discards them.",
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Reload from disk")
+                        .on_hover_text("Reopen the collection, discarding anything unsaved")
+                        .clicked()
+                    {
+                        choice = 1;
+                    }
+                    if ui
+                        .button("Keep my version")
+                        .on_hover_text(
+                            "Saving still refuses to overwrite until you reload or save elsewhere",
+                        )
+                        .clicked()
+                    {
+                        choice = 2;
+                    }
+                });
+            });
+        if choice == 1 {
+            self.disk_changes.clear();
+            self.perform(Pending::Reload);
+        } else if choice == 2 || !open {
+            self.disk_changes.clear();
+        }
+    }
+    /// The request a tracked path belongs to, for paths that name one.
+    pub fn request_named(&self, path: &str) -> Option<String> {
+        let collection = self.collection.as_ref()?;
+        let index = collection
+            .manifest
+            .requests
+            .iter()
+            .position(|request| request == path)?;
+        Some(collection.requests.get(index)?.definition.name.clone())
     }
     fn environment_dialog(&mut self, ctx: &egui::Context) {
         let mut open = true;

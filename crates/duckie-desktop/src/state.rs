@@ -98,6 +98,7 @@ pub enum IoEvent {
     },
     Message(Result<String>),
     Secrets(Result<SecretsFile>),
+    DiskChanged(Vec<(String, duckie_storage::Change)>),
 }
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Preferences {
@@ -191,6 +192,10 @@ pub struct Duckie {
     pub focus_url: bool,
     /// Bumped for every new scan; a worker whose generation no longer matches stops early.
     pub search_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Files found changed on disk, and the set already shown, so the same change is reported
+    /// once rather than on every focus.
+    pub disk_changes: Vec<(String, duckie_storage::Change)>,
+    pub disk_dismissed: Vec<String>,
     pub reveal: bool,
     pub new_env: String,
 }
@@ -251,6 +256,8 @@ impl Duckie {
             about: false,
             focus_url: true,
             search_generation: Default::default(),
+            disk_changes: vec![],
+            disk_dismissed: vec![],
             reveal: false,
             new_env: String::new(),
         };
@@ -501,6 +508,17 @@ impl Duckie {
             }
         });
     }
+    /// Re-checks the collection's files. Cheap enough to run whenever the window is focused,
+    /// because the watcher carries only hashes rather than the collection's contents.
+    pub fn check_disk(&mut self) {
+        let Some(watcher) = self.collection.as_ref().map(|c| c.watcher()) else {
+            return;
+        };
+        if self.io_busy {
+            return;
+        }
+        self.background(move || IoEvent::DiskChanged(watcher.compare().unwrap_or_default()));
+    }
     pub fn poll(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -589,6 +607,8 @@ impl Duckie {
                             self.prefs.last_collection = Some(c.root.clone());
                             self.status = format!("Saved to {}", c.root.display());
                             self.collection = Some(c);
+                            self.disk_changes.clear();
+                            self.disk_dismissed.clear();
                             if let Some(action) = self.after_save.take() {
                                 self.perform(action);
                             }
@@ -654,6 +674,13 @@ impl Duckie {
                             }
                             Err(e) => self.status = format!("Search failed: {e}"),
                         }
+                    }
+                }
+                IoEvent::DiskChanged(changed) => {
+                    let names: Vec<String> = changed.iter().map(|(name, _)| name.clone()).collect();
+                    if names != self.disk_dismissed {
+                        self.disk_dismissed.clone_from(&names);
+                        self.disk_changes = changed;
                     }
                 }
                 IoEvent::Message(result) => {

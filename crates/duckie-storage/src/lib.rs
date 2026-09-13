@@ -50,6 +50,44 @@ pub struct Collection {
     pub secrets: SecretsFile,
     hashes: BTreeMap<String, Option<String>>,
 }
+/// What each tracked file hashed to when the collection was last read or written.
+#[derive(Clone)]
+pub struct Watcher {
+    root: PathBuf,
+    hashes: BTreeMap<String, Option<String>>,
+}
+/// How a tracked file differs from what the collection last saw.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Change {
+    Modified,
+    Added,
+    Removed,
+}
+impl Watcher {
+    /// Paths whose contents no longer match, cheapest first: a file that has not changed costs
+    /// one read and one hash.
+    pub fn changed(&self) -> Result<Vec<String>> {
+        Ok(self.compare()?.into_iter().map(|(path, _)| path).collect())
+    }
+    pub fn compare(&self) -> Result<Vec<(String, Change)>> {
+        let mut changed = vec![];
+        for (name, saved) in &self.hashes {
+            let now = disk_hash(&resolve(&self.root, name)?)?;
+            if &now == saved {
+                continue;
+            }
+            changed.push((
+                name.clone(),
+                match (saved, &now) {
+                    (Some(_), None) => Change::Removed,
+                    (None, Some(_)) => Change::Added,
+                    _ => Change::Modified,
+                },
+            ));
+        }
+        Ok(changed)
+    }
+}
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -329,13 +367,15 @@ impl Collection {
         Ok(bytes)
     }
     pub fn changed_on_disk(&self) -> Result<Vec<String>> {
-        let mut changed = vec![];
-        for (name, saved) in &self.hashes {
-            if &disk_hash(&self.path(name)?)? != saved {
-                changed.push(name.clone());
-            }
+        self.watcher().changed()
+    }
+    /// A handle that re-checks the tracked files without copying the collection's contents.
+    /// Cloning a whole collection to answer "did anything change" would copy every body and test.
+    pub fn watcher(&self) -> Watcher {
+        Watcher {
+            root: self.root.clone(),
+            hashes: self.hashes.clone(),
         }
-        Ok(changed)
     }
     pub fn save(&mut self) -> Result<()> {
         let changed = self.changed_on_disk()?;
@@ -560,6 +600,47 @@ mod tests {
             Some(&nested)
         );
         assert_eq!(loaded.environments[0].extra.get("envExt"), Some(&nested));
+    }
+    #[test]
+    fn the_watcher_classifies_what_changed_under_the_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut collection = Collection::new(dir.path().to_path_buf(), "watched".into()).unwrap();
+        collection.requests.push(StoredRequest {
+            definition: RequestDefinition {
+                id: "one".into(),
+                body: Body::Json { text: "{}".into() },
+                ..Default::default()
+            },
+            source: "test('a', () => {});".into(),
+        });
+        collection.save().unwrap();
+        let watcher = collection.watcher();
+        assert!(watcher.compare().unwrap().is_empty(), "nothing changed yet");
+
+        // Modified, removed and added are told apart rather than lumped together.
+        let requests = dir.path().join("requests/one.request.json");
+        let body = dir.path().join("bodies/one.json");
+        fs::write(&requests, fs::read_to_string(&requests).unwrap() + " ").unwrap();
+        fs::remove_file(&body).unwrap();
+        let mut changed = watcher.compare().unwrap();
+        changed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            changed
+                .iter()
+                .map(|(path, change)| (path.as_str(), *change))
+                .collect::<Vec<_>>(),
+            [
+                ("bodies/one.json", Change::Removed),
+                ("requests/one.request.json", Change::Modified),
+            ]
+        );
+        // A file the collection never tracked is not its business.
+        fs::write(dir.path().join("unrelated.txt"), "x").unwrap();
+        assert_eq!(watcher.compare().unwrap().len(), 2);
+
+        // The watcher holds hashes only, so it keeps working after the collection is gone.
+        drop(collection);
+        assert_eq!(watcher.changed().unwrap().len(), 2);
     }
     #[test]
     fn future_schema_version_is_rejected() {

@@ -10,7 +10,7 @@ fn accent(ui: &egui::Ui) -> Color32 {
         Color32::from_rgb(30, 83, 161)
     }
 }
-fn warning(ui: &egui::Ui) -> Color32 {
+pub fn warning(ui: &egui::Ui) -> Color32 {
     if ui.visuals().dark_mode {
         Color32::from_rgb(241, 202, 119)
     } else {
@@ -1591,6 +1591,14 @@ impl eframe::App for Duckie {
             self.prefs.request_height = Some(panel.response.rect.height());
             egui::CentralPanel::default().show(ui, |ui| self.response(ui));
         });
+        // Someone may have edited the collection in another program while Duckie was away.
+        if ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::WindowFocused(true)))
+        }) {
+            self.check_disk();
+        }
         self.dialogs(&ctx);
         #[cfg(feature = "bench")]
         self.bench_frame(&ctx);
@@ -1919,6 +1927,51 @@ mod tests {
             samples[samples.len() - 1],
         );
         println!("GPU texture bytes uploaded across 40 frames: {texture_bytes}");
+    }
+    #[test]
+    fn the_disk_change_dialog_renders_and_names_the_request_a_path_belongs_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut collection =
+            duckie_storage::Collection::new(dir.path().to_path_buf(), "c".into()).unwrap();
+        collection.requests.push(duckie_storage::StoredRequest {
+            definition: RequestDefinition {
+                id: "one".into(),
+                name: "Fetch a duck".into(),
+                ..Default::default()
+            },
+            source: String::new(),
+        });
+        collection.save().unwrap();
+
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = Duckie::new(&cc);
+        let mut frame = eframe::Frame::_new_kittest();
+        app.use_collection(collection);
+        assert_eq!(
+            app.request_named("requests/one.request.json").as_deref(),
+            Some("Fetch a duck"),
+            "a request file is labelled with the request it holds"
+        );
+        assert_eq!(app.request_named("duckie.json"), None);
+
+        app.disk_changes = vec![
+            ("duckie.json".into(), duckie_storage::Change::Modified),
+            (
+                "requests/one.request.json".into(),
+                duckie_storage::Change::Removed,
+            ),
+        ];
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 820.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        assert!(!output.shapes.is_empty());
+        output.textures_delta.clear();
     }
     #[test]
     fn page_size_shrinks_only_for_very_long_lines() {
