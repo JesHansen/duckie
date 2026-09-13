@@ -33,6 +33,8 @@ Then open the `examples/local-api` collection in Duckie, or import `examples/ope
 
 A spec split across files imports too. References to other documents are followed relative to the document holding them — sibling files for a file import, same-origin URLs for a URL import — and onward from those, up to 50 documents and 20 MiB. Cross-origin references are **not** fetched: the credentials you gave for the spec would travel with them. Anything not retrieved is reported and still blocks the request that needs it.
 
+Parameters are expanded following the specification's style and `explode` rules, including object and array parameters in a query and the `label` and `matrix` path styles. Combinations with no defined form — an array of objects, for instance — are still blocked rather than guessed, so a wrong request is never sent silently.
+
 `node scripts/make-fixtures.mjs` generates the fixtures the performance targets in [ARCHITECTURE.md](ARCHITECTURE.md#9-performance-acceptance-targets) call for: a 1,000-request collection, a 10,000-request stress collection, and a 10+ MiB OpenAPI document, all under `fixtures/` (gitignored). Output is deterministic, so re-running it for a benchmark pass produces byte-identical fixtures.
 
 ## Local files and secrets

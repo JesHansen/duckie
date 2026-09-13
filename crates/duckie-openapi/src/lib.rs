@@ -281,6 +281,112 @@ fn scalar(value: &Value) -> Option<String> {
 fn list(value: &Value) -> Option<Vec<String>> {
     value.as_array()?.iter().map(scalar).collect()
 }
+/// An object example's fields, when every value is a scalar.
+///
+/// Order follows the parsed document, which serde_json sorts by key rather than preserving the
+/// order written. Object member order is not significant in JSON and no style gives it meaning,
+/// so the expansion differs from the specification's examples only in ordering.
+fn pairs(value: &Value) -> Option<Vec<(String, String)>> {
+    value
+        .as_object()?
+        .iter()
+        .map(|(name, v)| Some((name.clone(), scalar(v)?)))
+        .collect()
+}
+/// A parameter serialized for the wire. Query parameters can expand into several rows carrying
+/// names of their own; a path parameter expands into one value spliced into the URL, prefix and
+/// all, because the style's punctuation is part of the expansion.
+enum Expanded {
+    Rows(Vec<(String, String)>),
+    Path(String),
+}
+fn flatten(fields: &[(String, String)], joiner: &str) -> String {
+    fields
+        .iter()
+        .flat_map(|(name, value)| [name.as_str(), value.as_str()])
+        .collect::<Vec<_>>()
+        .join(joiner)
+}
+fn assigned(fields: &[(String, String)], joiner: &str) -> String {
+    fields
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(joiner)
+}
+/// `simple` style: the bare value, used by path and header parameters.
+fn simple(value: &Value, explode: bool) -> Option<String> {
+    if let Some(fields) = pairs(value) {
+        return Some(if explode {
+            assigned(&fields, ",")
+        } else {
+            flatten(&fields, ",")
+        });
+    }
+    if let Some(items) = list(value) {
+        return Some(items.join(","));
+    }
+    scalar(value)
+}
+/// Expands one parameter according to its style and explode flag, following the table in the
+/// OpenAPI specification. `None` means this build cannot reproduce the combination.
+fn expand(
+    location: &str,
+    style: &str,
+    explode: bool,
+    name: &str,
+    value: &Value,
+    delimiter: &str,
+) -> Option<Expanded> {
+    let one = |text: String| Some(Expanded::Rows(vec![(name.to_owned(), text)]));
+    match location {
+        "header" => one(simple(value, explode)?),
+        "path" => Some(Expanded::Path(match style {
+            "simple" => simple(value, explode)?,
+            "label" if explode => match (pairs(value), list(value)) {
+                (Some(fields), _) => format!(".{}", assigned(&fields, ".")),
+                (_, Some(items)) => format!(".{}", items.join(".")),
+                _ => format!(".{}", scalar(value)?),
+            },
+            "label" => format!(".{}", simple(value, false)?),
+            "matrix" if explode => match (pairs(value), list(value)) {
+                (Some(fields), _) => fields
+                    .iter()
+                    .map(|(field, value)| format!(";{field}={value}"))
+                    .collect(),
+                (_, Some(items)) => items.iter().map(|item| format!(";{name}={item}")).collect(),
+                _ => format!(";{name}={}", scalar(value)?),
+            },
+            "matrix" => format!(";{name}={}", simple(value, false)?),
+            _ => return None,
+        })),
+        "query" => {
+            if let Some(fields) = pairs(value) {
+                return Some(match style {
+                    // Exploded form objects contribute their property names as parameters.
+                    "form" if explode => Expanded::Rows(fields),
+                    "form" => Expanded::Rows(vec![(name.to_owned(), flatten(&fields, ","))]),
+                    "deepObject" => Expanded::Rows(
+                        fields
+                            .into_iter()
+                            .map(|(field, value)| (format!("{name}[{field}]"), value))
+                            .collect(),
+                    ),
+                    _ => return None,
+                });
+            }
+            if let Some(items) = list(value) {
+                return Some(if style == "form" && explode {
+                    Expanded::Rows(items.into_iter().map(|v| (name.to_owned(), v)).collect())
+                } else {
+                    Expanded::Rows(vec![(name.to_owned(), items.join(delimiter))])
+                });
+            }
+            one(scalar(value)?)
+        }
+        _ => None,
+    }
+}
 fn server_urls(servers: &Value) -> Vec<String> {
     servers
         .as_array()
@@ -433,16 +539,19 @@ pub fn import_value(root: Value) -> Result<ImportDraft> {
                 let nested = array
                     && (matches!(items["type"].as_str(), Some("object" | "array"))
                         || items.get("properties").is_some());
+                let object = schema["type"] == "object"
+                    || (schema["type"].is_null() && schema.get("properties").is_some());
                 // Only combinations this build can reproduce byte for byte are accepted; the rest
                 // stay blocked, because a silently wrong query is worse than a manual correction.
                 let supported = !nested
-                    && schema["type"] != "object"
                     && parameter.get("content").is_none()
                     && parameter["allowReserved"] != true
                     && match (location, style) {
                         ("query", "form") => true,
+                        ("query", "deepObject") => object && explode,
                         ("query", "spaceDelimited" | "pipeDelimited") => array && !explode,
-                        ("path" | "header", "simple") => true,
+                        ("path", "simple" | "label" | "matrix") => true,
+                        ("header", "simple") => true,
                         _ => false,
                     };
                 if !supported {
@@ -454,20 +563,17 @@ pub fn import_value(root: Value) -> Result<ImportDraft> {
                     "pipeDelimited" => "|",
                     _ => ",",
                 };
-                // An exploded form array becomes one row per item; every other supported array
-                // style joins into a single delimited value.
-                let values = if array {
-                    match example.as_ref().and_then(list) {
-                        Some(items) if location == "query" && style == "form" && explode => items,
-                        Some(items) => vec![items.join(delimiter)],
-                        None => vec![String::new()],
-                    }
-                } else {
-                    vec![example.as_ref().and_then(scalar).unwrap_or_default()]
-                };
+                // Without an example there is nothing to expand, so fall through to the single
+                // empty placeholder the needs-input path below fills in.
+                let expanded = example
+                    .as_ref()
+                    .and_then(|value| expand(location, style, explode, name, value, delimiter));
                 match location {
                     "path" => {
-                        let value = values.join(delimiter);
+                        let value = match expanded {
+                            Some(Expanded::Path(text)) => text,
+                            _ => String::new(),
+                        };
                         request.url = request
                             .url
                             .replace(&format!("{{{name}}}"), &format!("{{{{request.{name}}}}}"));
@@ -477,8 +583,12 @@ pub fn import_value(root: Value) -> Result<ImportDraft> {
                         }
                     }
                     "query" | "header" => {
-                        for value in values {
-                            let mut row = Row::new(name, &value);
+                        let rows = match expanded {
+                            Some(Expanded::Rows(rows)) => rows,
+                            _ => vec![(name.to_owned(), String::new())],
+                        };
+                        for (row_name, value) in rows {
+                            let mut row = Row::new(&row_name, &value);
                             row.enabled = parameter["required"] == true || example.is_some();
                             if value.is_empty() && parameter["required"] == true {
                                 request.variables.insert(name.into(), String::new());
@@ -948,6 +1058,117 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert!(diagnostics[0].contains("missing.json"), "{diagnostics:?}");
         assert!(deref(&root, &root["a"]).is_err());
+    }
+    /// Builds one operation with a single parameter and returns its query rows, headers and
+    /// path variable, so the specification's own style examples can be checked directly.
+    fn parameter(location: &str, style: &str, explode: bool, example: Value) -> RequestDefinition {
+        let schema = if example.is_object() {
+            json!({"type": "object"})
+        } else if example.is_array() {
+            json!({"type": "array", "items": {"type": "string"}})
+        } else {
+            json!({"type": "string"})
+        };
+        let mut p = json!({"name":"id","in":location,"style":style,"explode":explode,"example":example,"schema":schema});
+        if location == "path" {
+            p["required"] = json!(true);
+        }
+        let path = if location == "path" { "/map/{id}" } else { "/" };
+        let root = json!({"openapi":"3.1.0","paths":{path:{"get":{"parameters":[p]}}}});
+        import_json(&serde_json::to_vec(&root).unwrap())
+            .unwrap()
+            .operations[0]
+            .finish()
+    }
+    fn query_of(style: &str, explode: bool, example: Value) -> Vec<String> {
+        parameter("query", style, explode, example)
+            .query
+            .iter()
+            .map(|r| format!("{}={}", r.name, r.value))
+            .collect()
+    }
+    fn path_of(style: &str, explode: bool, example: Value) -> String {
+        parameter("path", style, explode, example)
+            .variables
+            .get("id")
+            .cloned()
+            .unwrap_or_default()
+    }
+    #[test]
+    fn object_query_parameters_follow_the_specification_table() {
+        let object = || json!({"role": "admin", "firstName": "Alex"});
+        // Properties come out in key order, because serde_json sorts them; the specification
+        // writes its examples in another order, which carries no meaning.
+        // form, explode=true: the object's own property names become parameters.
+        assert_eq!(
+            query_of("form", true, object()),
+            ["firstName=Alex", "role=admin"]
+        );
+        // form, explode=false: one parameter, names and values flattened.
+        assert_eq!(
+            query_of("form", false, object()),
+            ["id=firstName,Alex,role,admin"]
+        );
+        // deepObject: one bracketed parameter per property.
+        assert_eq!(
+            query_of("deepObject", true, object()),
+            ["id[firstName]=Alex", "id[role]=admin"]
+        );
+        // deepObject is only defined for exploded objects.
+        assert!(
+            !parameter("query", "deepObject", false, object())
+                .blockers
+                .is_empty()
+        );
+    }
+    #[test]
+    fn label_and_matrix_path_styles_carry_their_own_punctuation() {
+        let object = || json!({"role": "admin", "firstName": "Alex"});
+        let array = || json!(["3", "4", "5"]);
+        assert_eq!(path_of("label", false, json!("5")), ".5");
+        assert_eq!(path_of("label", false, array()), ".3,4,5");
+        assert_eq!(path_of("label", true, array()), ".3.4.5");
+        assert_eq!(
+            path_of("label", false, object()),
+            ".firstName,Alex,role,admin"
+        );
+        assert_eq!(
+            path_of("label", true, object()),
+            ".firstName=Alex.role=admin"
+        );
+        assert_eq!(path_of("matrix", false, json!("5")), ";id=5");
+        assert_eq!(path_of("matrix", false, array()), ";id=3,4,5");
+        assert_eq!(path_of("matrix", true, array()), ";id=3;id=4;id=5");
+        assert_eq!(
+            path_of("matrix", false, object()),
+            ";id=firstName,Alex,role,admin"
+        );
+        assert_eq!(
+            path_of("matrix", true, object()),
+            ";firstName=Alex;role=admin"
+        );
+        // simple objects, for completeness of the same table.
+        assert_eq!(
+            path_of("simple", false, object()),
+            "firstName,Alex,role,admin"
+        );
+        assert_eq!(
+            path_of("simple", true, object()),
+            "firstName=Alex,role=admin"
+        );
+        // The punctuation is part of the value, so the template keeps its single placeholder.
+        let request = parameter("path", "matrix", false, json!("5"));
+        assert!(
+            request.url.ends_with("/map/{{request.id}}"),
+            "{}",
+            request.url
+        );
+    }
+    #[test]
+    fn arrays_of_objects_have_no_defined_form_and_stay_blocked() {
+        let root = json!({"openapi":"3.1.0","paths":{"/":{"get":{"parameters":[{"name":"f","in":"query","style":"deepObject","explode":true,"schema":{"type":"array","items":{"type":"object"}}}]}}}});
+        let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
+        assert!(!draft.operations[0].finish().blockers.is_empty());
     }
     #[test]
     fn unsupported_serialization_blocks_send() {
