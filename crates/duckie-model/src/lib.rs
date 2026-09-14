@@ -9,6 +9,7 @@ use std::{
 };
 
 pub const MIB: u64 = 1024 * 1024;
+pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 pub type Values = BTreeMap<String, String>;
 pub type Extensions = BTreeMap<String, serde_json::Value>;
 pub fn new_id() -> String {
@@ -155,7 +156,7 @@ impl Default for RequestDefinition {
             auth: Auth::default(),
             body: Body::None,
             tests: TestDefinition::default(),
-            timeout_ms: 30_000,
+            timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             encoded_limit: 50 * MIB,
             decoded_limit: 50 * MIB,
             proxy: ProxyMode::System,
@@ -851,6 +852,13 @@ pub struct TestCase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn requests_default_to_a_lenient_timeout() {
+        assert_eq!(
+            RequestDefinition::default().timeout_ms,
+            DEFAULT_REQUEST_TIMEOUT_MS
+        );
+    }
     #[test]
     fn find_all_spans_chunks_without_duplicates_and_honours_limits() {
         let never = || false;

@@ -73,6 +73,8 @@ Useful shortcuts:
 
 Sending does not save automatically. Duckie retains dirty drafts, and **Ctrl+S** saves the entire collection together.
 
+New requests allow 10 minutes by default, including connection setup and response transfer. You can change the timeout and the encoded and decoded response-size limits per request under **Settings**.
+
 ## Collections and secrets
 
 A collection is a normal folder containing a `duckie.json` manifest and separate files for requests, bodies, tests, and environments. That makes collections suitable for ordinary source control and collaboration.

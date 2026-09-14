@@ -33,7 +33,6 @@ impl HttpEngine {
             .tls_backend_native()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(2)
             .pool_idle_timeout(Duration::from_secs(60));
         match proxy {

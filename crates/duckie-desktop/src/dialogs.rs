@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-const IMPORT_DEADLINE: Duration = Duration::from_secs(60);
+const IMPORT_DEADLINE: Duration = Duration::from_secs(10 * 60);
 
 /// Fetched `$ref` documents (parsed) and `externalValue` example content (raw bytes), keyed by
 /// resolved URI.
