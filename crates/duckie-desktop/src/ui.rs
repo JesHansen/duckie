@@ -27,63 +27,69 @@ fn success(ui: &egui::Ui) -> Color32 {
 pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
     let mut changed = false;
     let mut remove = None;
-    egui::Grid::new(id)
-        .num_columns(4)
-        .spacing([8.0, 6.0])
-        .striped(true)
+    let available = ui.available_width();
+    let (name_width, value_width) = row_widths(available);
+    egui::ScrollArea::horizontal()
+        .id_salt((id, "scroll"))
         .show(ui, |ui| {
-            ui.weak("Use");
-            ui.weak("Name");
-            ui.weak("Value");
-            ui.end_row();
-            for (i, row) in rows.iter_mut().enumerate() {
-                ui.push_id((i, "enabled"), |ui| {
-                    changed |= ui
-                        .checkbox(&mut row.enabled, "")
-                        .on_hover_text("Include this row")
-                        .changed();
-                });
-                let edit = ui
-                    .push_id((i, "name"), |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut row.name)
-                                .desired_width(200.0)
-                                .hint_text("Name"),
-                        )
-                        .changed()
-                    })
-                    .inner
-                    | ui.push_id((i, "value"), |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut row.value)
-                                .desired_width((ui.available_width() - 48.0).max(180.0))
-                                .hint_text("Value"),
-                        )
-                        .changed()
-                    })
-                    .inner;
-                if edit {
-                    row.raw = None;
-                    row.raw_is_literal = false;
-                    changed = true;
-                }
-                ui.push_id((i, "remove"), |ui| {
-                    if ui.small_button("×").on_hover_text("Remove row").clicked() {
-                        remove = Some(i);
+            egui::Grid::new(id)
+                .num_columns(4)
+                .spacing([8.0, 6.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.weak("Use");
+                    ui.weak("Name");
+                    ui.weak("Value");
+                    ui.end_row();
+                    for (i, row) in rows.iter_mut().enumerate() {
+                        changed |= ui
+                            .checkbox(&mut row.enabled, "")
+                            .on_hover_text("Include this row")
+                            .changed();
+                        let name_id = egui::Id::new((id, i, "name"));
+                        let edit = ui
+                            .add_sized(
+                                [name_width, ui.spacing().interact_size.y],
+                                egui::TextEdit::singleline(&mut row.name)
+                                    .id(name_id)
+                                    .hint_text("Name"),
+                            )
+                            .changed()
+                            | ui.add_sized(
+                                [value_width, ui.spacing().interact_size.y],
+                                egui::TextEdit::singleline(&mut row.value)
+                                    .id(egui::Id::new((id, i, "value")))
+                                    .hint_text("Value"),
+                            )
+                            .changed();
+                        if edit {
+                            row.raw = None;
+                            row.raw_is_literal = false;
+                            changed = true;
+                        }
+                        if ui.small_button("×").on_hover_text("Remove row").clicked() {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
                     }
                 });
-                ui.end_row();
-            }
         });
     if let Some(index) = remove {
         rows.remove(index);
         changed = true;
     }
     if ui.button("+ Add row").clicked() {
+        let new_name = egui::Id::new((id, rows.len(), "name"));
         rows.push(Row::new("", ""));
+        ui.memory_mut(|memory| memory.request_focus(new_name));
         changed = true;
     }
     changed
+}
+
+fn row_widths(available: f32) -> (f32, f32) {
+    let name = ((available - 90.0) * 0.35).clamp(180.0, 260.0);
+    (name, (available - name - 90.0).max(240.0))
 }
 pub fn variables(ui: &mut egui::Ui, id: &str, values: &mut Values) -> bool {
     let mut entries: Vec<Row> = values.iter().map(|(k, v)| Row::new(k, v)).collect();
@@ -93,6 +99,30 @@ pub fn variables(ui: &mut egui::Ui, id: &str, values: &mut Values) -> bool {
     } else {
         false
     }
+}
+
+fn request_variables(ui: &mut egui::Ui, id: &str, draft: &mut Draft) -> bool {
+    if draft.variable_rows.is_empty() && !draft.request.variables.is_empty() {
+        draft.variable_rows = draft
+            .request
+            .variables
+            .iter()
+            .map(|(name, value)| Row::new(name, value))
+            .collect();
+    }
+    if rows(ui, id, &mut draft.variable_rows) {
+        draft.request.variables = variable_values(&draft.variable_rows);
+        true
+    } else {
+        false
+    }
+}
+
+fn variable_values(rows: &[Row]) -> Values {
+    rows.iter()
+        .filter(|row| !row.name.is_empty())
+        .map(|row| (row.name.clone(), row.value.clone()))
+        .collect()
 }
 /// Draws one of the request editors with the shared find bar above it, records whether the
 /// caret is inside it, and reveals either the current match or a pending Go-to-line.
@@ -733,11 +763,7 @@ impl Duckie {
         match self.request_tab {
             RequestTab::Params => {
                 ui.label(RichText::new("Path / request variables").strong());
-                changed |= variables(
-                    ui,
-                    "request-vars",
-                    &mut self.drafts[self.selected].request.variables,
-                );
+                changed |= request_variables(ui, "request-vars", &mut self.drafts[self.selected]);
                 ui.add_space(8.0);
                 ui.separator();
                 ui.label(RichText::new("Query parameters").strong());
@@ -1981,6 +2007,25 @@ mod tests {
             request_pane_height(RequestTab::Params, &request),
             empty_params + 2.0 * 32.0
         );
+    }
+    #[test]
+    fn row_editors_keep_useful_field_widths_in_the_minimum_window() {
+        let (name, value) = row_widths(500.0);
+        assert!(name >= 180.0);
+        assert!(value >= 240.0);
+    }
+    #[test]
+    fn blank_request_variable_stays_appended_while_its_name_is_entered() {
+        let mut rows = vec![Row::new("existing", "one")];
+        rows.push(Row::new("", ""));
+        assert_eq!(rows[1].name, "");
+
+        rows[1].name.push('x');
+        let values = variable_values(&rows);
+
+        assert_eq!(rows[0].name, "existing");
+        assert_eq!(rows[1].name, "x");
+        assert_eq!(values.get("x").map(String::as_str), Some(""));
     }
     #[test]
     fn ctrl_t_falls_back_to_focusing_the_field_when_the_clipboard_has_no_text() {

@@ -780,14 +780,26 @@ impl Duckie {
                     let existing = &self.drafts[m.existing_index].request;
                     fresh.id = existing.id.clone();
                     fresh.tests = existing.tests.clone();
+                    self.drafts[m.existing_index].variable_rows = fresh
+                        .variables
+                        .iter()
+                        .map(|(name, value)| Row::new(name, value))
+                        .collect();
                     self.drafts[m.existing_index].request = fresh;
                     self.drafts[m.existing_index].dirty = true;
                 }
             }
             for (row, &j) in plan.additions.iter().enumerate() {
                 if import.apply_additions[row] {
+                    let request = draft.operations[j].finish();
+                    let variable_rows = request
+                        .variables
+                        .iter()
+                        .map(|(name, value)| Row::new(name, value))
+                        .collect();
                     self.drafts.push(Draft {
-                        request: draft.operations[j].finish(),
+                        request,
+                        variable_rows,
                         source: String::new(),
                         revision: 0,
                         dirty: true,

@@ -129,6 +129,9 @@ pub enum ResponseTab {
 #[derive(Default)]
 pub struct Draft {
     pub request: RequestDefinition,
+    /// Editable request-variable rows. Unlike the serialized `BTreeMap`, this keeps a newly
+    /// appended blank row in place while its name is being entered.
+    pub variable_rows: Vec<Row>,
     pub source: String,
     pub revision: u64,
     pub dirty: bool,
@@ -878,6 +881,12 @@ impl Duckie {
             .iter()
             .map(|r| Draft {
                 request: r.definition.clone(),
+                variable_rows: r
+                    .definition
+                    .variables
+                    .iter()
+                    .map(|(name, value)| Row::new(name, value))
+                    .collect(),
                 source: r.source.clone(),
                 revision: 0,
                 dirty: false,
