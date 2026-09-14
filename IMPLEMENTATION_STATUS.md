@@ -33,6 +33,8 @@ Security-review hardening validated on 13 September 2026 in the working tree: `c
 
 Request-editor bug fixes validated on 14 September 2026 in the working tree: formatting, strict workspace Clippy, and all 112 non-measurement workspace tests passed (three new regressions); four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. Release binaries, the portable ZIP, and performance gates were not rebuilt or remeasured for this change.
 
+Params hierarchy fix validated on 14 September 2026 in the working tree: the query table now appears first so ordinary parameter rows update the address immediately, while the separate template-variable table explains its explicit `{{request.name}}` use. Formatting, strict workspace Clippy, and all 114 non-measurement workspace tests passed; four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. Release binaries, the portable ZIP, and performance gates were not rebuilt or remeasured for this change.
+
 | Area | Recorded status | Remaining scope or qualification |
 | --- | --- | --- |
 | 1. Performance | Accepted for the agreed v1 scope | See PERFORMANCE.md. Cold launch has owner acceptance without a measured p95; CPU frame construction is only a lower bound on input-to-paint; reported GUI memory peaks exclude workers. |

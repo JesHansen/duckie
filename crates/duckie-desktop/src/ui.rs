@@ -762,12 +762,15 @@ impl Duckie {
         self.editor_focused = false;
         match self.request_tab {
             RequestTab::Params => {
-                ui.label(RichText::new("Path / request variables").strong());
-                changed |= request_variables(ui, "request-vars", &mut self.drafts[self.selected]);
-                ui.add_space(8.0);
-                ui.separator();
                 ui.label(RichText::new("Query parameters").strong());
                 changed |= rows(ui, "query", &mut self.drafts[self.selected].request.query);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new("Template variables").strong());
+                ui.weak(
+                    "Used only where referenced as {{request.name}} in the URL, headers, or body.",
+                );
+                changed |= request_variables(ui, "request-vars", &mut self.drafts[self.selected]);
             }
             RequestTab::Headers => {
                 changed |= rows(
