@@ -8,6 +8,8 @@ use std::{
     sync::Arc,
 };
 
+pub mod curl;
+
 pub const MIB: u64 = 1024 * 1024;
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 pub type Values = BTreeMap<String, String>;

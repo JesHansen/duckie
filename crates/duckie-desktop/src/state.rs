@@ -99,6 +99,23 @@ fn decode_preview(
     )
 }
 pub const EXAMPLE: &str = "test(\"returns a successful JSON response\", () => {\n  expect(response.status).toBe(200);\n  expect(response.header(\"content-type\")).toContain(\"application/json\");\n  expect(response.json()).toBeType(\"object\");\n});\n";
+fn json_with_depth(bytes: &[u8], limit: usize) -> Result<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let mut stack = vec![(&value, 1usize)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth > limit {
+            anyhow::bail!("JSON exceeds tree depth limit");
+        }
+        match value {
+            serde_json::Value::Array(values) => stack.extend(values.iter().map(|v| (v, depth + 1))),
+            serde_json::Value::Object(values) => {
+                stack.extend(values.values().map(|v| (v, depth + 1)))
+            }
+            _ => {}
+        }
+    }
+    Ok(value)
+}
 /// Plain text on the system clipboard, if any. Windows-only, like the rest of this desktop
 /// shell: reading `CF_UNICODETEXT` through `OpenClipboard`/`GetClipboardData` is the ordinary
 /// Win32 way to do this and needs no clipboard crate this app has no other use for. `None` for
@@ -152,6 +169,7 @@ pub enum RequestTab {
 #[derive(PartialEq, Clone, Copy)]
 pub enum ResponseTab {
     Body,
+    Json,
     Headers,
     Tests,
     Details,
@@ -185,6 +203,8 @@ pub struct ResponseView {
     pub result: ExecutionResult,
     pub preview: String,
     pub pretty: Option<String>,
+    /// Parsed only for complete JSON bodies within the tree's fixed budget.
+    pub json: Option<serde_json::Value>,
     pub binary: bool,
     /// Encoding used for the displayed text, when it came from a declared supported charset.
     pub charset: Option<String>,
@@ -304,6 +324,9 @@ pub struct Duckie {
     pub response_tab: ResponseTab,
     pub search: String,
     pub response_find: crate::editor::Find,
+    pub json_path: String,
+    pub json_selected: String,
+    pub json_expanded: BTreeSet<String>,
     pub editor_find: crate::editor::Find,
     /// Last frame's focus, so Ctrl+F can route to whichever editor the caret is in.
     pub editor_focused: bool,
@@ -381,6 +404,9 @@ impl Duckie {
             response_tab: ResponseTab::Body,
             search: String::new(),
             response_find: Default::default(),
+            json_path: String::new(),
+            json_selected: String::new(),
+            json_expanded: [String::new()].into_iter().collect(),
             editor_find: Default::default(),
             editor_focused: false,
             goto_line: None,
@@ -535,6 +561,71 @@ impl Duckie {
         self.selected = self.drafts.len() - 1;
         self.focus_url = true;
         self.request_tab = RequestTab::Params;
+    }
+    pub fn paste_curl(&mut self) {
+        let Some(text) = (self.clipboard_read)() else {
+            self.status = "Clipboard has no text cURL command".into();
+            return;
+        };
+        match duckie_model::curl::import(&text) {
+            Ok(mut request) => {
+                request.id = self.drafts[self.selected].request.id.clone();
+                self.drafts[self.selected] = Draft {
+                    request,
+                    dirty: true,
+                    revision: self.drafts[self.selected].revision + 1,
+                    ..Default::default()
+                };
+                self.request_tab = RequestTab::Params;
+                self.focus_url = true;
+                self.status = "Imported cURL into the current draft for review".into();
+            }
+            Err(error) => {
+                self.drafts[self.selected].error = format!("Could not import cURL: {error}")
+            }
+        }
+    }
+    pub fn copy_curl(&mut self, shell: duckie_model::curl::Shell, credentials: bool) {
+        let mut request = self.drafts[self.selected].request.clone();
+        let snapshot = self.snapshot();
+        if let Some(binding) = request.auth.bearer.take() {
+            let value = if credentials {
+                snapshot
+                    .secrets
+                    .get(&binding.secret)
+                    .cloned()
+                    .unwrap_or_else(|| "<missing secret>".into())
+            } else {
+                "<redacted>".into()
+            };
+            request
+                .headers
+                .push(Row::new("Authorization", format!("Bearer {value}")));
+        }
+        if let Some(binding) = request.auth.api_key.take() {
+            let value = if credentials {
+                snapshot
+                    .secrets
+                    .get(&binding.secret)
+                    .cloned()
+                    .unwrap_or_else(|| "<missing secret>".into())
+            } else {
+                "<redacted>".into()
+            };
+            request.headers.push(Row::new(binding.header, value));
+        }
+        match duckie_model::curl::export(&request, shell, credentials) {
+            Ok(command) => {
+                self.ctx.copy_text(command);
+                self.status = if credentials {
+                    "Copied cURL with credentials"
+                } else {
+                    "Copied redacted cURL"
+                }
+                .into();
+            }
+            Err(error) => self.status = format!("Could not export cURL: {error}"),
+        }
     }
     pub fn touch(&mut self) {
         let d = &mut self.drafts[self.selected];
@@ -751,6 +842,16 @@ impl Duckie {
                     }
                     self.status = result.outcome.to_string();
                     self.active_testing = result.outcome == Outcome::Complete;
+                    let json =
+                        if result.outcome == Outcome::Complete && result.body.len() <= 2 * MIB {
+                            result
+                                .body
+                                .read(0, 2 * MIB)
+                                .ok()
+                                .and_then(|bytes| json_with_depth(&bytes, 128).ok())
+                        } else {
+                            None
+                        };
                     self.responses.insert(
                         id,
                         ResponseView {
@@ -758,6 +859,7 @@ impl Duckie {
                             result,
                             preview: "Preparing preview…".into(),
                             pretty: None,
+                            json,
                             binary: false,
                             charset: None,
                             charset_override: None,

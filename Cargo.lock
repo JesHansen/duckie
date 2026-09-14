@@ -859,6 +859,22 @@ dependencies = [
  "duckie-http",
  "duckie-model",
  "duckie-tests",
+ "serde",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "duckie-cli"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "duckie-app",
+ "duckie-http",
+ "duckie-model",
+ "duckie-storage",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]

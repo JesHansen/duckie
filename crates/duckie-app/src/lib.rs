@@ -8,6 +8,95 @@ use std::sync::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadlessReport {
+    pub request_id: String,
+    pub request_name: String,
+    pub outcome: Outcome,
+    pub status: Option<u16>,
+    pub duration_ms: u64,
+    pub tests: Option<TestReport>,
+    pub error: Option<String>,
+}
+impl HeadlessReport {
+    pub fn assertion_failed(&self) -> bool {
+        self.tests
+            .as_ref()
+            .is_some_and(|r| r.suite_error.is_some() || r.tests.iter().any(|t| !t.passed))
+    }
+    pub fn execution_failed(&self) -> bool {
+        self.error.is_some() || self.outcome != Outcome::Complete
+    }
+}
+
+/// Shared, renderer-free request path used by command-line automation.
+pub async fn execute_headless(
+    http: &duckie_http::HttpEngine,
+    request: &RequestDefinition,
+    source: String,
+    environment: EnvironmentSnapshot,
+    cancel: CancellationToken,
+) -> HeadlessReport {
+    let failure = |error: anyhow::Error| HeadlessReport {
+        request_id: request.id.clone(),
+        request_name: request.name.clone(),
+        outcome: Outcome::ConnectionError,
+        status: None,
+        duration_ms: 0,
+        tests: None,
+        error: Some(error.to_string()),
+    };
+    let prepared = match prepare(request, &environment, &RunBindings::default(), 0) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let result = match http.execute(prepared, cancel.clone()).await {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    let mut report = HeadlessReport {
+        request_id: request.id.clone(),
+        request_name: request.name.clone(),
+        outcome: result.outcome.clone(),
+        status: result.status,
+        duration_ms: result.duration_ms,
+        tests: None,
+        error: result.body_error.clone(),
+    };
+    if result.outcome == Outcome::Complete && request.tests.enabled && !source.trim().is_empty() {
+        match duckie_tests::TestInput::from_result(source, &result, environment.values) {
+            Ok(input) => match duckie_tests::evaluate(input, cancel).await {
+                Ok(tests) => report.tests = Some(tests),
+                Err(error) => report.error = Some(error.to_string()),
+            },
+            Err(error) => report.error = Some(error.to_string()),
+        }
+    }
+    report
+}
+
+/// Runs frozen inputs sequentially in their supplied order and stops starting new work after
+/// cancellation. A fresh environment snapshot is cloned for each request so execution cannot
+/// mutate the selected collection environment.
+pub async fn execute_headless_suite(
+    http: &duckie_http::HttpEngine,
+    requests: Vec<(RequestDefinition, String)>,
+    environment: EnvironmentSnapshot,
+    cancel: CancellationToken,
+) -> Vec<HeadlessReport> {
+    let mut reports = Vec::with_capacity(requests.len());
+    for (request, source) in requests {
+        if cancel.is_cancelled() {
+            break;
+        }
+        reports.push(
+            execute_headless(http, &request, source, environment.clone(), cancel.clone()).await,
+        );
+    }
+    reports
+}
+
 pub enum RunEvent {
     Response(ExecutionResult),
     Tests {

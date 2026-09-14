@@ -26,9 +26,11 @@ test("returns the message", () => {
 ## What you can do
 
 - Compose HTTP requests with query parameters, headers, bodies, bearer tokens, and API keys.
+- Paste supported cURL commands into editable drafts and copy requests as redacted POSIX or PowerShell cURL commands.
 - Organize requests into local collections and environments that are easy to inspect and version.
 - Import Swagger 2.0 and OpenAPI 3.x JSON specifications, including multi-file specifications.
 - Inspect text, JSON, binary, compressed, and large responses without leaving the app.
+- Navigate bounded JSON responses as a tree and copy values or RFC 6901 JSON Pointers.
 - Run JavaScript assertions against a response, or rerun them without sending the request again.
 - Keep credentials session-only by default, with an explicit option to save them in a gitignored secrets file.
 
@@ -73,6 +75,8 @@ Useful shortcuts:
 
 Sending does not save automatically. Duckie retains dirty drafts, and **Ctrl+S** saves the entire collection together.
 
+Use **File → Paste cURL from clipboard** to replace the current draft with a reviewable import. Duckie supports URLs, methods, repeated headers, textual `--data` forms, URL-encoded bodies, multipart fields, and file references. Unsupported cURL options stop the import. **Request → Copy as cURL** offers POSIX and PowerShell syntax; exports redact common credential headers unless you deliberately choose a “with credentials” action.
+
 New requests allow 10 minutes by default, including connection setup and response transfer. You can change the timeout and the encoded and decoded response-size limits per request under **Settings**.
 
 ## Collections and secrets
@@ -106,6 +110,18 @@ test("returns a successful JSON response", () => {
 `expect(value)` supports `toBe`, `toEqual`, `toContain`, `toBeType`, `toBeLessThan`, `toBeLessThanOrEqual`, `toBeGreaterThan`, and `toBeGreaterThanOrEqual`. The `response` object exposes `status`, `header(name)`, `headers(name)`, `text()`, `json()`, `bodySize`, and `durationMs`.
 
 Tests run in a fresh native worker process with no filesystem, network, module loader, or Node.js API. Async callbacks are not supported. Process isolation is not an operating-system security sandbox.
+
+## Headless execution
+
+Build the workspace, then run one saved request by ID or exact name:
+
+```powershell
+.\target\release\duckie-cli.exe run --collection .\examples\local-api --request "Echo a request" --environment dev
+```
+
+Omit `--request` (or pass `--suite`) to run every request sequentially in manifest order. Add `--format json` for machine-readable output. Duckie does not change collection files during a CLI run. It reads the selected environment and local secrets file; a process environment variable named `DUCKIE_SECRET_name` overrides secret `name`, and `DUCKIE_SECRET_group__name` addresses `group.name` without putting its value in command-line arguments.
+
+Exit code 0 means success, 1 means an assertion or suite failure, 2 means configuration or execution failure, and 3 means cancellation. Keep `duckie-test-worker.exe` beside `duckie-cli.exe` when requests have tests.
 
 ## Development
 

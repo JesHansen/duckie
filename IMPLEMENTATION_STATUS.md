@@ -15,6 +15,8 @@ Recorded on 13 September 2026:
 
 ## Validation snapshot
 
+cURL exchange, JSON tree navigation, and headless CLI execution validated on 14 September 2026: formatting, strict workspace Clippy, and all 129 non-measurement workspace tests passed; four performance measurements remained intentionally ignored. The desktop imports supported cURL commands as reviewable drafts and exports redacted or deliberately credential-bearing POSIX/PowerShell commands. Complete valid JSON responses up to 2 MiB and 128 levels have a virtualized RFC 6901 pointer-based tree. `duckie-cli` runs a named request or the collection sequentially without saving, supports text/JSON output, environment-only secret overrides, cancellation, and exit codes 0/1/2/3. A direct CLI smoke test against the bundled server passed both the named-request JSON-output path and the two-request text suite, including their test-worker assertions. Release binaries and portable ZIP were not rebuilt or revalidated.
+
 The previous checkpoint at commit `fa0231c` recorded 64 passing tests, successful formatting and strict Clippy checks, and a matching `dist/Duckie-0.1.0-windows-x64.zip`. These are historical results from 13 September 2026, not verification of subsequent changes. Re-run relevant checks before claiming a newer build or package is validated.
 
 Path-value fix validated on 13 September 2026 in the working tree: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` passed (71 tests passed; four performance measurements intentionally ignored). Both Node-backed end-to-end tests passed. The release binaries and portable ZIP were not rebuilt or revalidated for this change.
@@ -53,7 +55,10 @@ Lenient timeout defaults validated on 14 September 2026 in the working tree: new
 
 ## Implemented foundation
 
-- Eight Rust crates separate the model, storage, HTTP transport, OpenAPI import, assertion client/worker, orchestration, and native desktop UI.
+- Nine Rust crates separate the model, storage, HTTP transport, OpenAPI import, assertion client/worker, orchestration, headless CLI, and native desktop UI.
+- cURL import/export is a strict data conversion path in the model. The desktop exposes reviewable paste and redacted-by-default POSIX/PowerShell copy actions.
+- Complete JSON response bodies within a 2 MiB and 128-level budget can be explored as a collapsible tree with RFC 6901 pointer lookup and value/pointer copying; raw response presentation remains available.
+- The renderer-free `duckie-cli` executes one request or a sequential collection suite through shared preparation, transport, and test-worker code, with stable text/JSON reporting and exit codes.
 - Scratch and saved requests support custom methods, ordered duplicate query/header rows, namespaced interpolation, run bindings, bearer/API-key authentication, and redacted request summaries. Secrets are environment-scoped and separate from ordinary request files.
 - JSON/text, URL-encoded form, multipart fields/files, and streamed file bodies work with native Windows TLS, HTTP/1.1 and HTTP/2, proxy selection, timeout and cancellation. Requests have no automatic retries or redirect following.
 - Responses use bounded streaming decompression with separate encoded/decoded caps and a 2 MiB spill threshold. Preview pages adapt to long lines; at most three responses are retained. Raw-body find scans bounded chunks off the UI thread. Progress distinguishes received and decoded bytes.

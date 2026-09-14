@@ -1,16 +1,21 @@
 [package]
-name = "duckie-app"
+name = "duckie-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "duckie-cli"
+path = "src/main.rs"
+
 [dependencies]
 duckie-model.workspace = true
+duckie-storage.workspace = true
 duckie-http.workspace = true
-duckie-tests.workspace = true
+duckie-app.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-anyhow.workspace = true
 serde.workspace = true
-
+serde_json.workspace = true
+anyhow.workspace = true

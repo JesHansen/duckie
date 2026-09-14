@@ -24,6 +24,77 @@ fn success(ui: &egui::Ui) -> Color32 {
         Color32::from_rgb(24, 114, 66)
     }
 }
+fn pointer_part(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+fn json_value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+struct JsonRow<'a> {
+    label: String,
+    pointer: String,
+    value: &'a serde_json::Value,
+    depth: usize,
+}
+fn json_rows<'a>(
+    value: &'a serde_json::Value,
+    expanded: &std::collections::BTreeSet<String>,
+) -> Vec<JsonRow<'a>> {
+    fn visit<'a>(
+        rows: &mut Vec<JsonRow<'a>>,
+        label: String,
+        pointer: String,
+        value: &'a serde_json::Value,
+        depth: usize,
+        expanded: &std::collections::BTreeSet<String>,
+    ) {
+        if rows.len() >= 10_000 {
+            return;
+        }
+        rows.push(JsonRow {
+            label,
+            pointer: pointer.clone(),
+            value,
+            depth,
+        });
+        if !expanded.contains(&pointer) {
+            return;
+        }
+        match value {
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    visit(
+                        rows,
+                        key.clone(),
+                        format!("{pointer}/{}", pointer_part(key)),
+                        value,
+                        depth + 1,
+                        expanded,
+                    )
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    visit(
+                        rows,
+                        format!("[{index}]"),
+                        format!("{pointer}/{index}"),
+                        value,
+                        depth + 1,
+                        expanded,
+                    )
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut rows = vec![];
+    visit(&mut rows, "$".into(), String::new(), value, 0, expanded);
+    rows
+}
 pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
     let mut changed = false;
     let mut remove = None;
@@ -420,6 +491,10 @@ impl Duckie {
                     self.request_action(Pending::Import);
                     ui.close();
                 }
+                if ui.button("Paste cURL from clipboard").clicked() {
+                    self.paste_curl();
+                    ui.close();
+                }
                 if ui.button("Update from spec…").clicked() {
                     self.request_action(Pending::UpdateFromSpec);
                     ui.close();
@@ -470,6 +545,27 @@ impl Duckie {
                     self.selected = self.drafts.len() - 1;
                     ui.close();
                 }
+                ui.separator();
+                ui.menu_button("Copy as cURL", |ui| {
+                    if ui.button("POSIX (redacted)").clicked() {
+                        self.copy_curl(duckie_model::curl::Shell::Posix, false);
+                        ui.close();
+                    }
+                    if ui.button("PowerShell (redacted)").clicked() {
+                        self.copy_curl(duckie_model::curl::Shell::PowerShell, false);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.weak("The commands below may expose credentials.");
+                    if ui.button("POSIX with credentials").clicked() {
+                        self.copy_curl(duckie_model::curl::Shell::Posix, true);
+                        ui.close();
+                    }
+                    if ui.button("PowerShell with credentials").clicked() {
+                        self.copy_curl(duckie_model::curl::Shell::PowerShell, true);
+                        ui.close();
+                    }
+                });
                 if ui.button("Close response").clicked() {
                     self.responses
                         .remove(&self.drafts[self.selected].request.id);
@@ -1229,6 +1325,7 @@ impl Duckie {
         ui.horizontal(|ui| {
             for (tab, label) in [
                 (ResponseTab::Body, "Body"),
+                (ResponseTab::Json, "JSON tree"),
                 (ResponseTab::Headers, "Headers"),
                 (ResponseTab::Tests, "Test results"),
                 (ResponseTab::Details, "Request details"),
@@ -1423,6 +1520,86 @@ impl Duckie {
                             },
                         },
                     );
+                }
+            }
+            ResponseTab::Json => {
+                if let Some(json) = &view.json {
+                    ui.horizontal(|ui| {
+                        ui.label("Pointer");
+                        ui.text_edit_singleline(&mut self.json_path);
+                        if ui.button("Go").clicked() {
+                            if json.pointer(&self.json_path).is_some() {
+                                self.json_selected = self.json_path.clone();
+                            } else {
+                                self.status = "JSON pointer was not found".into();
+                            }
+                        }
+                    });
+                    let selected = json.pointer(&self.json_selected).unwrap_or(json);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.monospace(if self.json_selected.is_empty() {
+                            "/ (root)"
+                        } else {
+                            &self.json_selected
+                        });
+                        if ui.button("Copy value").clicked() {
+                            ui.ctx().copy_text(json_value_text(selected));
+                        }
+                        if ui.button("Copy JSON Pointer").clicked() {
+                            ui.ctx().copy_text(self.json_selected.clone());
+                        }
+                    });
+                    ui.separator();
+                    let rows = json_rows(json, &self.json_expanded);
+                    let count = rows.len();
+                    let height = ui.spacing().interact_size.y;
+                    egui::ScrollArea::vertical().show_rows(ui, height, count, |ui, range| {
+                        for row in &rows[range] {
+                            ui.horizontal(|ui| {
+                                ui.add_space(row.depth as f32 * 16.0);
+                                let container = matches!(
+                                    row.value,
+                                    serde_json::Value::Object(_) | serde_json::Value::Array(_)
+                                );
+                                if container
+                                    && ui
+                                        .small_button(
+                                            if self.json_expanded.contains(&row.pointer) {
+                                                "▾"
+                                            } else {
+                                                "▸"
+                                            },
+                                        )
+                                        .clicked()
+                                {
+                                    if !self.json_expanded.remove(&row.pointer) {
+                                        self.json_expanded.insert(row.pointer.clone());
+                                    }
+                                } else if !container {
+                                    ui.add_space(22.0);
+                                }
+                                let detail = match row.value {
+                                    serde_json::Value::Object(v) => format!("{{{}}}", v.len()),
+                                    serde_json::Value::Array(v) => format!("[{}]", v.len()),
+                                    _ => json_value_text(row.value),
+                                };
+                                if ui
+                                    .selectable_label(
+                                        self.json_selected == row.pointer,
+                                        format!("{}: {detail}", row.label),
+                                    )
+                                    .clicked()
+                                {
+                                    self.json_selected = row.pointer.clone();
+                                }
+                            });
+                        }
+                    });
+                    if count >= 10_000 {
+                        ui.weak("Showing the first 10,000 expanded values");
+                    }
+                } else {
+                    ui.weak("JSON tree is available for valid complete JSON responses up to 2 MiB and 128 levels. Use Body for this response.");
                 }
             }
             ResponseTab::Headers => {
@@ -2218,6 +2395,24 @@ mod tests {
         // An offset that is not the start of a hit leaves a caret there instead.
         assert_eq!(char_range_at(text, 6, &found), Some(5..5));
     }
+    #[test]
+    fn json_tree_uses_escaped_pointers_and_only_expands_selected_containers() {
+        let json = serde_json::json!({"a/b": {"~key": [1, 2]}});
+        let collapsed = json_rows(&json, &[String::new()].into_iter().collect());
+        assert_eq!(
+            collapsed
+                .iter()
+                .map(|r| r.pointer.as_str())
+                .collect::<Vec<_>>(),
+            vec!["", "/a~1b"]
+        );
+        let expanded = json_rows(
+            &json,
+            &[String::new(), "/a~1b".into()].into_iter().collect(),
+        );
+        assert!(expanded.iter().any(|r| r.pointer == "/a~1b/~0key"));
+        assert_eq!(json.pointer("/a~1b/~0key/1"), Some(&serde_json::json!(2)));
+    }
     /// Frame construction time under input, with a thousand requests listed and a megabyte of
     /// response on screen. This is CPU time to produce a frame, so it is a lower bound on
     /// input-to-paint: it excludes upload, present and the compositor.
@@ -2252,6 +2447,7 @@ mod tests {
         app.responses.insert(
             id.clone(),
             ResponseView {
+                json: None,
                 result: ExecutionResult {
                     request_id: id,
                     run_id: "r".into(),
@@ -2410,6 +2606,7 @@ mod tests {
         app.responses.insert(
             id.clone(),
             ResponseView {
+                json: Some(serde_json::json!({"duck":1,"duck2":2})),
                 result: ExecutionResult {
                     request_id: id.clone(),
                     run_id: "run".into(),
