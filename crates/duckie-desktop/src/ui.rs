@@ -1757,7 +1757,10 @@ impl eframe::App for Duckie {
             });
             ctx.request_repaint_after(Duration::from_millis(250));
         }
-        if self.prefs.sidebar && ui.available_width() > 1000.0 {
+        // The window's enforced minimum width is 900 (see main.rs); the sidebar's own minimum
+        // size is 190, which always leaves room for the central panel above that floor, so the
+        // sidebar is never hidden out from under Ctrl+B/Ctrl+K at a supported window size.
+        if self.prefs.sidebar {
             let panel = egui::Panel::left("sidebar")
                 .default_size(self.prefs.sidebar_width.unwrap_or(240.0))
                 .size_range(190.0..=350.0)
