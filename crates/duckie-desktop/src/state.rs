@@ -56,6 +56,27 @@ fn utf8_validity(bytes: &[u8]) -> (usize, bool) {
         Err(e) => (e.valid_up_to(), e.error_len().is_some()),
     }
 }
+
+fn uses_utf8_boundaries(selected: Option<&str>) -> bool {
+    selected.is_none_or(|label| {
+        encoding_rs::Encoding::for_label(label.as_bytes())
+            .is_some_and(|encoding| encoding == encoding_rs::UTF_8)
+    })
+}
+
+fn trim_orphaned_utf8_tail(bytes: &mut Vec<u8>) {
+    let skip = bytes
+        .iter()
+        .take(3)
+        .take_while(|&&byte| byte & 0xC0 == 0x80)
+        .count();
+    bytes.drain(..skip);
+}
+
+fn complete_utf8_len(bytes: &[u8], maximum: usize) -> usize {
+    let length = maximum.min(bytes.len());
+    utf8_validity(&bytes[..length]).0
+}
 fn decode_preview(
     bytes: &[u8],
     declared: Option<&str>,
@@ -531,8 +552,10 @@ impl Duckie {
             let id = self.drafts[self.selected].request.id.clone();
             self.ensure_loaded(&id);
             if self.drafts[self.selected].pending {
-                self.drafts[self.selected].error =
-                    format!("Could not load request content before sending: {}", self.status);
+                self.drafts[self.selected].error = format!(
+                    "Could not load request content before sending: {}",
+                    self.status
+                );
                 return;
             }
         }
@@ -604,16 +627,14 @@ impl Duckie {
                 let selected = charset_override.as_deref().or(declared.as_deref());
                 let forced = charset_override.is_some();
                 // `offset` is an arbitrary byte position from paging, not necessarily a character
-                // boundary. This alignment only makes sense for the plain-UTF-8 path below — a
-                // declared or overridden charset is decoded by `encoding_rs`, which tolerates a
-                // mid-character cut on its own.
-                if offset > 0 && selected.is_none() {
+                // boundary. Align every UTF-8 path, whether detected, declared, or overridden.
+                // Other declared/overridden encodings continue through `encoding_rs` unchanged.
+                if offset > 0 && uses_utf8_boundaries(selected) {
                     // The leading bytes here are an orphaned tail with no lead byte to decode
                     // against (that lead byte was on the previous page, which isn't re-read) —
                     // drop them rather than let them read as invalid UTF-8 and misclassify the
                     // whole response as binary.
-                    let skip = bytes.iter().take(3).take_while(|&&b| b & 0xC0 == 0x80).count();
-                    bytes.drain(..skip);
+                    trim_orphaned_utf8_tail(&mut bytes);
                 }
                 let (_, binary, charset) = decode_preview(&bytes, selected, forced);
                 let pretty = if offset == 0 && body.len() <= MIB {
@@ -627,8 +648,8 @@ impl Duckie {
                 let mut shown_len = (page as usize).min(bytes.len());
                 // Likewise, trim the page slice back to a full character rather than cut one in
                 // half at the end — the dropped tail bytes reappear at the start of the next page.
-                if shown_len < bytes.len() && selected.is_none() {
-                    shown_len = utf8_validity(&bytes[..shown_len]).0;
+                if shown_len < bytes.len() && uses_utf8_boundaries(selected) {
+                    shown_len = complete_utf8_len(&bytes, shown_len);
                 }
                 // Decode only the selected page after using the larger sample for classification.
                 let shown = decode_preview(&bytes[..shown_len], selected, forced).0;
@@ -974,19 +995,19 @@ impl Duckie {
     /// it — a cheap no-op once already loaded. Called every frame for the selected draft, and
     /// for every draft before `save_collection` writes anything, so a request already saved
     /// with real content is never overwritten with the empty placeholder it opened with.
-    pub fn ensure_loaded(&mut self, id: &str) {
+    pub fn ensure_loaded(&mut self, id: &str) -> bool {
         if !self.drafts.iter().any(|d| d.request.id == id && d.pending) {
-            return;
+            return true;
         }
         let Some(collection) = &mut self.collection else {
-            return;
+            return false;
         };
         if let Err(e) = collection.ensure_loaded(id) {
             self.status = format!("Could not load {id}: {e}");
-            return;
+            return false;
         }
         let Some(stored) = collection.requests.iter().find(|r| r.definition.id == id) else {
-            return;
+            return false;
         };
         let source = stored.source.clone();
         let body = stored.definition.body.clone();
@@ -995,6 +1016,7 @@ impl Duckie {
             draft.request.body = body;
             draft.pending = false;
         }
+        true
     }
     pub fn save_collection(&mut self, as_new: bool) {
         if self.io_busy {
@@ -1168,5 +1190,25 @@ mod preview_tests {
         assert!(!decode_preview(cut, None, false).1);
         // A genuinely invalid byte (not just a truncated tail) must still be flagged.
         assert!(decode_preview(b"caf\xff", None, false).1);
+    }
+
+    #[test]
+    fn declared_and_overridden_utf8_use_character_safe_page_boundaries() {
+        assert!(uses_utf8_boundaries(None));
+        assert!(uses_utf8_boundaries(Some("utf-8")));
+        assert!(uses_utf8_boundaries(Some("UTF8")));
+        assert!(!uses_utf8_boundaries(Some("windows-1252")));
+        assert!(!uses_utf8_boundaries(Some("made-up")));
+
+        // A page beginning on the trailing byte of é must discard that orphan, and a page ending
+        // on its lead byte must stop before it. These are the same operations preview() applies
+        // for automatic, declared, and user-overridden UTF-8.
+        let mut beginning = vec![0xA9, b'd', b'u', b'c', b'k'];
+        trim_orphaned_utf8_tail(&mut beginning);
+        assert_eq!(std::str::from_utf8(&beginning).unwrap(), "duck");
+
+        let ending = b"duck\xC3";
+        let shown_len = complete_utf8_len(ending, ending.len());
+        assert_eq!(std::str::from_utf8(&ending[..shown_len]).unwrap(), "duck");
     }
 }

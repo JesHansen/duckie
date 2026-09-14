@@ -37,6 +37,8 @@ Params hierarchy fix validated on 14 September 2026 in the working tree: the que
 
 Swagger 2.0 import support validated on 14 September 2026 in the working tree: formatting, strict workspace Clippy, and all 117 non-measurement workspace tests passed (three new `duckie-openapi` regressions); four performance measurements remained intentionally ignored. Coverage includes host/scheme/base-path handling, source-origin defaults, primitive and collection parameters, JSON bodies through `definitions`, header API keys, and multipart file fields. Both Node-backed end-to-end tests passed. Release binaries, the portable ZIP, and performance gates were not rebuilt or remeasured for this change.
 
+Post-import review fixes validated on 14 September 2026 in the working tree: `cargo fmt --all -- --check`, strict workspace Clippy, and all 120 non-measurement workspace tests passed; four performance measurements remained intentionally ignored. Regressions cover refusing a spec update when existing deferred tests cannot be loaded, character-safe paging for detected, declared, and explicitly selected UTF-8, and counting the selected authentication alternative's blockers in the import review summary. Both Node-backed end-to-end tests passed. Release binaries, the portable ZIP, and performance gates were not rebuilt or remeasured for this change.
+
 | Area | Recorded status | Remaining scope or qualification |
 | --- | --- | --- |
 | 1. Performance | Accepted for the agreed v1 scope | See PERFORMANCE.md. Cold launch has owner acceptance without a measured p95; CPU frame construction is only a lower bound on input-to-paint; reported GUI memory peaks exclude workers. |

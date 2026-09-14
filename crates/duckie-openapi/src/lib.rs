@@ -1253,7 +1253,8 @@ pub fn import_value_based(
                                     }
                                 }
                                 for (label, value) in examples {
-                                    let mut blockers = example_blocker.clone().into_iter().collect::<Vec<_>>();
+                                    let mut blockers =
+                                        example_blocker.clone().into_iter().collect::<Vec<_>>();
                                     let body = if media.contains("json") {
                                         Body::Json {
                                             text: serde_json::to_string_pretty(&value)?,
@@ -1325,6 +1326,19 @@ pub fn import_value_based(
     Ok(draft)
 }
 impl Operation {
+    pub fn has_diagnostics(&self) -> bool {
+        !self.diagnostics.is_empty()
+            || !self.request.blockers.is_empty()
+            || self
+                .auth_options
+                .get(self.auth_index)
+                .is_some_and(|(_, _, blockers)| !blockers.is_empty())
+            || self
+                .bodies
+                .get(self.body_index)
+                .is_some_and(|(_, _, blockers)| !blockers.is_empty())
+    }
+
     pub fn finish(&self) -> RequestDefinition {
         let mut request = self.request.clone();
         if let Some((_, body, blockers)) = self.bodies.get(self.body_index) {
@@ -1512,10 +1526,25 @@ mod tests {
     fn security_alternatives_are_not_flattened() {
         let root = json!({"openapi":"3.1.0","paths":{"/":{"get":{"security":[{"bearer":[],"key":[]},{}]}}},"components":{"securitySchemes":{"bearer":{"type":"http","scheme":"bearer"},"key":{"type":"apiKey","in":"header","name":"X-Key"}}}});
         let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
-        let op = &draft.operations[0];
+        let mut op = draft.operations.into_iter().next().unwrap();
         assert_eq!(op.auth_options.len(), 2);
         assert!(op.finish().auth.api_key.is_some());
         assert!(op.finish().auth.bearer.is_some());
+        assert!(
+            op.has_diagnostics(),
+            "the review summary must count the selected combined-auth blocker"
+        );
+        assert!(op.finish().blockers.iter().any(|blocker| {
+            blocker.contains("Combined bearer and API-key authentication is not supported")
+        }));
+
+        op.auth_index = 1;
+        assert!(op.finish().auth.api_key.is_none());
+        assert!(op.finish().auth.bearer.is_none());
+        assert!(
+            !op.has_diagnostics(),
+            "selecting the supported no-auth alternative clears the diagnostic"
+        );
     }
     #[test]
     fn references_examples_and_readonly_fields() {
@@ -1668,7 +1697,10 @@ mod tests {
             })
             .collect();
         (
-            op.bodies.iter().map(|(label, _, _)| label.clone()).collect(),
+            op.bodies
+                .iter()
+                .map(|(label, _, _)| label.clone())
+                .collect(),
             texts,
         )
     }

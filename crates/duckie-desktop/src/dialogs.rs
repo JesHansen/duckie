@@ -470,6 +470,27 @@ impl Duckie {
             .position(|request| request == path)?;
         Some(collection.requests.get(index)?.definition.name.clone())
     }
+
+    fn hydrate_update_matches(
+        &mut self,
+        plan: &duckie_openapi::ReimportPlan,
+        apply_updates: &[bool],
+    ) -> bool {
+        for existing_id in plan
+            .matches
+            .iter()
+            .enumerate()
+            .filter(|(row, _)| apply_updates[*row])
+            .map(|(_, matched)| self.drafts[matched.existing_index].request.id.clone())
+            .collect::<Vec<_>>()
+        {
+            if !self.ensure_loaded(&existing_id) {
+                return false;
+            }
+        }
+        true
+    }
+
     fn environment_dialog(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut dirty = false;
@@ -598,15 +619,69 @@ impl Duckie {
                         for (i,op) in draft.operations.iter_mut().enumerate(){if !format!("{} {}",op.request.name,op.request.url).to_lowercase().contains(&import.filter.to_lowercase()){continue;}ui.horizontal(|ui|{ui.checkbox(&mut op.selected,"");if ui.selectable_label(import.selected==i,format!("{}  {}",op.request.method,op.request.name)).clicked(){import.selected=i;}});}
                     });
                     let right=&mut columns[1];let op=&mut draft.operations[import.selected];right.strong(format!("{} {}",op.request.method,op.request.url));
-                    if !op.bodies.is_empty(){egui::ComboBox::from_id_salt("import-body").selected_text(&op.bodies[op.body_index].0).width(350.0).show_ui(right,|ui|{for (i,(name,_,_)) in op.bodies.iter().enumerate(){ui.selectable_value(&mut op.body_index,i,name);}});}
-                    egui::ComboBox::from_id_salt("import-auth").selected_text(&op.auth_options[op.auth_index].0).width(350.0).show_ui(right,|ui|{for (i,(name,_,_)) in op.auth_options.iter().enumerate(){ui.selectable_value(&mut op.auth_index,i,name);}});
-                    egui::ScrollArea::vertical().id_salt("operation-preview").max_height(270.0).show(right,|ui|{
-                        for d in &op.diagnostics{ui.label(d);}for d in op.request.blockers.iter().chain(&op.auth_options[op.auth_index].2).chain(op.bodies.get(op.body_index).map(|(_,_,b)|b).into_iter().flatten()){ui.colored_label(ui.visuals().warn_fg_color,format!("Unsupported: {d}"));}
-                        if let Some((_,Body::Json{text}|Body::Text{text},_))=op.bodies.get(op.body_index){ui.add(egui::Label::new(egui::RichText::new(text).monospace()).selectable(true));}
-                    });
+                    if !op.bodies.is_empty() {
+                        egui::ComboBox::from_id_salt("import-body")
+                            .selected_text(&op.bodies[op.body_index].0)
+                            .width(350.0)
+                            .show_ui(right, |ui| {
+                                for (i, (name, _, _)) in op.bodies.iter().enumerate() {
+                                    ui.selectable_value(&mut op.body_index, i, name);
+                                }
+                            });
+                    }
+                    egui::ComboBox::from_id_salt("import-auth")
+                        .selected_text(&op.auth_options[op.auth_index].0)
+                        .width(350.0)
+                        .show_ui(right, |ui| {
+                            for (i, (name, _, _)) in op.auth_options.iter().enumerate() {
+                                ui.selectable_value(&mut op.auth_index, i, name);
+                            }
+                        });
+                    egui::ScrollArea::vertical()
+                        .id_salt("operation-preview")
+                        .max_height(270.0)
+                        .show(right, |ui| {
+                            for diagnostic in &op.diagnostics {
+                                ui.label(diagnostic);
+                            }
+                            for blocker in op
+                                .request
+                                .blockers
+                                .iter()
+                                .chain(&op.auth_options[op.auth_index].2)
+                                .chain(
+                                    op.bodies
+                                        .get(op.body_index)
+                                        .map(|(_, _, blockers)| blockers)
+                                        .into_iter()
+                                        .flatten(),
+                                )
+                            {
+                                ui.colored_label(
+                                    ui.visuals().warn_fg_color,
+                                    format!("Unsupported: {blocker}"),
+                                );
+                            }
+                            if let Some((_, Body::Json { text } | Body::Text { text }, _)) =
+                                op.bodies.get(op.body_index)
+                            {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(text).monospace())
+                                        .selectable(true),
+                                );
+                            }
+                        });
                 });
-                ui.separator();for diagnostic in &draft.diagnostics{ui.label(diagnostic);}
-                let count=draft.operations.iter().filter(|op|op.selected).count();let needs=draft.operations.iter().filter(|op|op.selected && (!op.diagnostics.is_empty() || !op.request.blockers.is_empty() || !op.bodies.get(op.body_index).map(|(_,_,b)|b.is_empty()).unwrap_or(true))).count();
+                ui.separator();
+                for diagnostic in &draft.diagnostics {
+                    ui.label(diagnostic);
+                }
+                let count = draft.operations.iter().filter(|op| op.selected).count();
+                let needs = draft
+                    .operations
+                    .iter()
+                    .filter(|op| op.selected && op.has_diagnostics())
+                    .count();
                 ui.label(format!("{count} operations selected · {needs} have diagnostics"));
                 ui.horizontal(|ui|{back=ui.button("Back").clicked();commit=ui.add_enabled(count>0 && !self.io_busy,egui::Button::new(format!("Import {count} requests into a new folder…"))).clicked();});
             }}
@@ -763,6 +838,16 @@ impl Duckie {
                 Err(e) => import.error = e.to_string(),
             }
         }
+        if apply
+            && let Some(plan) = import.plan.as_ref()
+            && !self.hydrate_update_matches(plan, &import.apply_updates)
+        {
+            import.error = format!(
+                "Could not load existing request content before applying updates: {}",
+                self.status
+            );
+            apply = false;
+        }
         if apply && let (Some(draft), Some(plan)) = (import.draft.take(), import.plan.take()) {
             // Whole-operation replace: every field but id and tests comes from the fresh spec,
             // exactly as a first import would produce it. Removal is by id, decided up front,
@@ -779,8 +864,6 @@ impl Duckie {
                     // Hydrate first: if this draft hasn't been selected since the collection
                     // opened, `existing.tests` is still an empty placeholder, and copying it
                     // below would silently wipe out real, saved tests.
-                    let existing_id = self.drafts[m.existing_index].request.id.clone();
-                    self.ensure_loaded(&existing_id);
                     let mut fresh = draft.operations[m.operation_index].finish();
                     let existing = &self.drafts[m.existing_index].request;
                     fresh.id = existing.id.clone();
@@ -858,6 +941,42 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn spec_update_stops_when_existing_tests_cannot_be_hydrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut collection =
+            duckie_storage::Collection::new(dir.path().to_path_buf(), "collection".into()).unwrap();
+        collection.requests.push(StoredRequest::new(
+            RequestDefinition {
+                id: "one".into(),
+                ..Default::default()
+            },
+            "test('preserved', () => {});".into(),
+        ));
+        collection.save().unwrap();
+
+        let opened = duckie_storage::Collection::open(dir.path()).unwrap();
+        std::fs::remove_file(dir.path().join("tests/one.test.js")).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Duckie::new(&eframe::CreationContext::_new_kittest(ctx));
+        app.use_collection(opened);
+        assert!(app.drafts[0].pending);
+
+        let plan = duckie_openapi::ReimportPlan {
+            matches: vec![duckie_openapi::Match {
+                existing_index: 0,
+                operation_index: 0,
+                changed: true,
+            }],
+            additions: vec![],
+            removals: vec![],
+        };
+        assert!(!app.hydrate_update_matches(&plan, &[true]));
+        assert!(app.drafts[0].pending);
+        assert!(app.drafts[0].source.is_empty());
+        assert!(app.status.contains("Could not load one"));
+    }
 
     async fn remote_server<F>(
         response: F,
