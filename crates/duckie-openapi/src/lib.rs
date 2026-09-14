@@ -15,7 +15,7 @@ pub struct Operation {
     pub selected: bool,
     pub request: RequestDefinition,
     pub diagnostics: Vec<String>,
-    pub bodies: Vec<(String, Body)>,
+    pub bodies: Vec<(String, Body, Vec<String>)>,
     pub body_index: usize,
     pub auth_options: Vec<(String, Auth, Vec<String>)>,
     pub auth_index: usize,
@@ -1161,16 +1161,17 @@ pub fn import_value_based(
                                             bodies.push((
                                                 format!("{media} · Generated"),
                                                 Body::Multipart { parts },
+                                                vec![],
                                             ));
                                         }
                                         Err(e) => {
                                             diagnostics.push(e.to_string());
-                                            request.blockers.push(format!(
-                                                "{media}: body needs manual configuration"
-                                            ));
                                             bodies.push((
                                                 format!("{media} · Supply manually"),
                                                 Body::None,
+                                                vec![format!(
+                                                    "{media}: body needs manual configuration"
+                                                )],
                                             ));
                                         }
                                     }
@@ -1190,6 +1191,7 @@ pub fn import_value_based(
                                             path: String::new(),
                                             content_type: media.clone(),
                                         },
+                                        vec![],
                                     ));
                                     continue;
                                 }
@@ -1217,6 +1219,7 @@ pub fn import_value_based(
                                     examples
                                         .push((format!("{media} · From example"), example.clone()));
                                 }
+                                let mut example_blocker = None;
                                 if examples.is_empty() {
                                     match variants(&root, &definition["schema"]) {
                                         Ok(list) => {
@@ -1235,13 +1238,14 @@ pub fn import_value_based(
                                                 format!("{media} · Supply body manually"),
                                                 Value::Null,
                                             ));
-                                            request.blockers.push(format!(
+                                            example_blocker = Some(format!(
                                                 "{media}: body example needs manual input"
                                             ));
                                         }
                                     }
                                 }
                                 for (label, value) in examples {
+                                    let mut blockers = example_blocker.clone().into_iter().collect::<Vec<_>>();
                                     let body = if media.contains("json") {
                                         Body::Json {
                                             text: serde_json::to_string_pretty(&value)?,
@@ -1266,19 +1270,25 @@ pub fn import_value_based(
                                                 .unwrap_or_else(|| value.to_string()),
                                         }
                                     } else {
-                                        request.blockers.push(format!(
+                                        blockers.push(format!(
                                             "Body media type {media} requires manual configuration"
                                         ));
                                         Body::None
                                     };
-                                    bodies.push((label, body));
+                                    bodies.push((label, body, blockers));
                                 }
                             }
                         }
                     }
                 }
             }
-            if let Some((_, body)) = bodies.first() {
+            // Default to a candidate Duckie can actually send when one exists, rather than
+            // whichever media type happened to come first in the spec.
+            let body_index = bodies
+                .iter()
+                .position(|(_, _, blockers)| blockers.is_empty())
+                .unwrap_or(0);
+            if let Some((_, body, _)) = bodies.get(body_index) {
                 request.body = body.clone();
             }
             if operation.get("callbacks").is_some() {
@@ -1289,7 +1299,7 @@ pub fn import_value_based(
                 request,
                 diagnostics,
                 bodies,
-                body_index: 0,
+                body_index,
                 auth_options,
                 auth_index: 0,
             });
@@ -1309,8 +1319,9 @@ pub fn import_value_based(
 impl Operation {
     pub fn finish(&self) -> RequestDefinition {
         let mut request = self.request.clone();
-        if let Some((_, body)) = self.bodies.get(self.body_index) {
+        if let Some((_, body, blockers)) = self.bodies.get(self.body_index) {
             request.body = body.clone();
+            request.blockers.extend(blockers.clone());
         }
         if let Some((_, auth, blockers)) = self.auth_options.get(self.auth_index) {
             request.auth = auth.clone();
@@ -1643,13 +1654,13 @@ mod tests {
         let texts = op
             .bodies
             .iter()
-            .map(|(_, body)| match body {
+            .map(|(_, body, _)| match body {
                 Body::Json { text } => text.clone(),
                 _ => String::new(),
             })
             .collect();
         (
-            op.bodies.iter().map(|(label, _)| label.clone()).collect(),
+            op.bodies.iter().map(|(label, _, _)| label.clone()).collect(),
             texts,
         )
     }

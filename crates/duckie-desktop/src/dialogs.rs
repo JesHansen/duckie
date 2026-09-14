@@ -598,15 +598,15 @@ impl Duckie {
                         for (i,op) in draft.operations.iter_mut().enumerate(){if !format!("{} {}",op.request.name,op.request.url).to_lowercase().contains(&import.filter.to_lowercase()){continue;}ui.horizontal(|ui|{ui.checkbox(&mut op.selected,"");if ui.selectable_label(import.selected==i,format!("{}  {}",op.request.method,op.request.name)).clicked(){import.selected=i;}});}
                     });
                     let right=&mut columns[1];let op=&mut draft.operations[import.selected];right.strong(format!("{} {}",op.request.method,op.request.url));
-                    if !op.bodies.is_empty(){egui::ComboBox::from_id_salt("import-body").selected_text(&op.bodies[op.body_index].0).width(350.0).show_ui(right,|ui|{for (i,(name,_)) in op.bodies.iter().enumerate(){ui.selectable_value(&mut op.body_index,i,name);}});}
+                    if !op.bodies.is_empty(){egui::ComboBox::from_id_salt("import-body").selected_text(&op.bodies[op.body_index].0).width(350.0).show_ui(right,|ui|{for (i,(name,_,_)) in op.bodies.iter().enumerate(){ui.selectable_value(&mut op.body_index,i,name);}});}
                     egui::ComboBox::from_id_salt("import-auth").selected_text(&op.auth_options[op.auth_index].0).width(350.0).show_ui(right,|ui|{for (i,(name,_,_)) in op.auth_options.iter().enumerate(){ui.selectable_value(&mut op.auth_index,i,name);}});
                     egui::ScrollArea::vertical().id_salt("operation-preview").max_height(270.0).show(right,|ui|{
-                        for d in &op.diagnostics{ui.label(d);}for d in op.request.blockers.iter().chain(&op.auth_options[op.auth_index].2){ui.colored_label(ui.visuals().warn_fg_color,format!("Unsupported: {d}"));}
-                        if let Some((_,Body::Json{text}|Body::Text{text}))=op.bodies.get(op.body_index){ui.add(egui::Label::new(egui::RichText::new(text).monospace()).selectable(true));}
+                        for d in &op.diagnostics{ui.label(d);}for d in op.request.blockers.iter().chain(&op.auth_options[op.auth_index].2).chain(op.bodies.get(op.body_index).map(|(_,_,b)|b).into_iter().flatten()){ui.colored_label(ui.visuals().warn_fg_color,format!("Unsupported: {d}"));}
+                        if let Some((_,Body::Json{text}|Body::Text{text},_))=op.bodies.get(op.body_index){ui.add(egui::Label::new(egui::RichText::new(text).monospace()).selectable(true));}
                     });
                 });
                 ui.separator();for diagnostic in &draft.diagnostics{ui.label(diagnostic);}
-                let count=draft.operations.iter().filter(|op|op.selected).count();let needs=draft.operations.iter().filter(|op|op.selected && (!op.diagnostics.is_empty() || !op.request.blockers.is_empty())).count();
+                let count=draft.operations.iter().filter(|op|op.selected).count();let needs=draft.operations.iter().filter(|op|op.selected && (!op.diagnostics.is_empty() || !op.request.blockers.is_empty() || !op.bodies.get(op.body_index).map(|(_,_,b)|b.is_empty()).unwrap_or(true))).count();
                 ui.label(format!("{count} operations selected · {needs} have diagnostics"));
                 ui.horizontal(|ui|{back=ui.button("Back").clicked();commit=ui.add_enabled(count>0 && !self.io_busy,egui::Button::new(format!("Import {count} requests into a new folder…"))).clicked();});
             }}
