@@ -1,89 +1,113 @@
 # Duckie
 
-A small, local HTTP workbench for Windows. **1.0.0 is the v1 release**, based on [ARCHITECTURE.md](ARCHITECTURE.md) and [UI_DESIGN.md](UI_DESIGN.md), with the owner decisions and delivery status in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) taking precedence.
+<p align="center">
+  <img src="assets/duckie.png" alt="Duckie" width="280">
+</p>
 
-Compose a request, paste credentials, send once, inspect the response, and run JavaScript assertions. No Duckie account, telemetry, update checks, cloud service, or background API traffic. Collection files stay on your disk.
+Duckie is a fast, local HTTP workbench for Windows. Build requests, keep them in plain files, inspect responses, and write JavaScript assertions without creating an account or sending your work to a cloud service.
 
-## Documentation
+It is useful for exploring an API, keeping repeatable requests beside a project, and turning a response check into a small executable test.
 
-| Document | Purpose |
-| --- | --- |
-| This README | Run, use, and verify Duckie; licensing. |
-| [Implementation status](IMPLEMENTATION_STATUS.md) | Current owner decisions, accepted scope, prioritized backlog, and known defects. |
-| [Performance](PERFORMANCE.md) | Benchmark commands, measured results, and limitations. |
-| [Architecture](ARCHITECTURE.md) / [UI design](UI_DESIGN.md) | Original design proposals; later decisions in the status document take precedence. |
-| [Contributor and agent guidance](AGENTS.md) | Provider-neutral working instructions and documentation ownership. |
+For example, send a request to a local service:
 
-## Run
+```http
+GET http://127.0.0.1:8787/echo?message=hello
+```
 
-Requirements for development: Windows x64, Rust 1.95 or newer with the MSVC toolchain, and Visual Studio C++ Build Tools with the Windows SDK. Node.js is needed only for the local development server and the two end-to-end tests that drive it.
+Then check its response in Duckie:
+
+```javascript
+test("returns the message", () => {
+  expect(response.status).toBe(200);
+  expect(response.json().query).toEqual([["message", "hello"]]);
+});
+```
+
+## What you can do
+
+- Compose HTTP requests with query parameters, headers, bodies, bearer tokens, and API keys.
+- Organize requests into local collections and environments that are easy to inspect and version.
+- Import Swagger 2.0 and OpenAPI 3.x JSON specifications, including multi-file specifications.
+- Inspect text, JSON, binary, compressed, and large responses without leaving the app.
+- Run JavaScript assertions against a response, or rerun them without sending the request again.
+- Keep credentials session-only by default, with an explicit option to save them in a gitignored secrets file.
+
+Duckie has no account, telemetry, update checks, cloud service, or automatic background API traffic. Collections stay on your disk.
+
+## Run Duckie
+
+Duckie currently builds from source on Windows x64. You need Rust 1.95 or newer with the MSVC toolchain, plus Visual Studio C++ Build Tools and the Windows SDK.
 
 ```powershell
 cargo build --workspace --release
 .\target\release\duckie.exe
 ```
 
-Duckie draws with OpenGL 3 or newer. If the graphics driver cannot provide that — which can happen in a virtual desktop session without acceleration — it reports the failure in a dialog and exits rather than starting invisibly. The build compiles the application icon into `duckie.exe`, so Explorer and a pinned taskbar shortcut show it, and the running window sets the same artwork on itself. Both come from `assets/duckie.png` via `./scripts/make-icon.ps1`, which is only worth rerunning when the artwork changes — its output is committed. The same script generates `assets/duckie-test-worker.ico` from `assets/duckie-test-worker.png` with `./scripts/make-icon.ps1 -Source assets/duckie-test-worker.png -IconName duckie-test-worker.ico -SkipWindowIcon`; the worker build embeds it into `duckie-test-worker.exe`. Keep that executable beside `duckie.exe`. Building only the desktop crate does not build the test worker. A portable ZIP can be produced with `./scripts/package.ps1`.
+The app requires OpenGL 3 or newer. Keep `duckie-test-worker.exe` beside `duckie.exe`; building the whole workspace as shown above produces both executables. To create a portable ZIP, run:
 
-The sidebar groups requests under their folder, in the order the collection stores them. Click a folder to collapse it; the state is remembered between launches. Requests with no folder appear under **Ungrouped**. Right-click a request to move it up or down within its folder — ordering is written to the manifest on Save. Searching looks inside collapsed folders, so a match is never hidden. Reopening a collection restores the request and environment you were last on, along with the sidebar width and the request/response split. These are matched by name, so opening a different collection simply starts at its first request.
+```powershell
+.\scripts\package.ps1
+```
 
-On first launch, paste an HTTP(S) URL and press **Ctrl+Enter**. Auth is a single choice between none, a bearer token, and a header API key. Change request tabs to edit parameters, headers, body, tests, and transport settings. **Ctrl+T** pastes the clipboard straight into the request's bearer token and selects bearer authentication — copy a token, press Ctrl+T, done. If the clipboard has no text, it falls back to switching to the Auth tab and focusing the token field for a manual paste. **Ctrl+S saves the whole collection**, including its dirty drafts and local environment changes. Sending never saves automatically.
+## Take a quick tour
 
-The Params tab puts query parameters first; enabled rows appear in the address bar as they are edited. Template variables are separate and affect a URL, header, or body only where they are referenced explicitly, for example as `{{request.customerId}}`.
-
-A 3xx response can be opened as a fresh GET request from its Details view. Its query stays literal until you edit a parameter, so response-controlled text cannot silently become a Duckie variable expression or acquire a secret from the selected environment.
-
-The body, test and response-body views are monospace editors with a line-number gutter, JSON and JavaScript colouring, and bracket pairing that tints the bracket under the caret and its partner. Colouring stops above 64 KiB, where the cost of drawing thousands of separately coloured runs would show; a larger response draws plain and says so. They do not wrap; long lines scroll sideways under the gutter. **Ctrl+F** opens find for whichever editor holds the caret, and otherwise for the response body. Enter and Shift+Enter step forward and back through matches, the current match is highlighted more strongly than the rest, and the counter reads `3 of 12`. Matching is case-sensitive. A large body is shown a page at a time; pages are 1 MiB, or 128 KiB when the content has very long lines, since a single unbroken line of a million characters is expensive to lay out.
-
-In the response body's **Raw** view, find searches the whole body, not just the visible page: the scan runs in the background in bounded chunks, so a body that only exists on disk is never loaded whole, and stepping to a match loads the page holding it and selects it. The **Pretty** view is a reformatted copy whose offsets do not map back to the body, so find there stays page-local and says so. Scans stop after 50,000 matches, and replacing the query abandons a scan already running.
-
-Response text follows a supported `charset` declared in `Content-Type`, including common legacy encodings such as Windows-1252. If the charset is unknown or undeclared bytes are not valid UTF-8, Duckie keeps treating the response as binary but offers explicit UTF-8 and Windows-1252 preview choices. Those choices affect display and find only: Save body and response tests continue to use the original bytes. Unsupported or stacked `Content-Encoding` values stop body processing and report a sanitized, actionable diagnostic without echoing arbitrary header data.
-
-## Try locally
+Start the bundled example server (Node.js is required for this example):
 
 ```powershell
 node scripts/dev-server.mjs
 ```
 
-Then open the `examples/local-api` collection in Duckie, or import `examples/openapi.json`. The server binds only to `127.0.0.1:8787`. It has echo, error-status, redirect, delayed, and compressed-response endpoints. The protected OpenAPI URL is `http://127.0.0.1:8787/protected/openapi.json`; its illustrative development token is `duckie-local-demo`.
+Then open the `examples/local-api` collection in Duckie. It exercises echo, error-status, redirect, delayed, and compressed-response endpoints on `127.0.0.1:8787`.
 
-Swagger 2.0 and OpenAPI 3.0/3.1/3.2 JSON specifications are supported. A spec split across files imports too. References are followed relative to the document holding them — within the selected specification's folder for a file import, and on the original origin for a URL import. Canonical path checks reject local escapes through parent paths, absolute paths, symlinks, or junctions. External acquisition stops after 50 unique attempts or 20 MiB, counting failed responses and invalid documents too; URL acquisition also shares a 60-second overall deadline and the import's cancellation control. Cross-origin references are **not** fetched: the credentials you gave for the spec would travel with them. Anything not retrieved is reported and still blocks the request that needs it. A relative `servers` entry resolves against the document that declared it, so a path item pulled in from another file honors its own server override rather than the root document's. An example's `externalValue` content is fetched under the same limits and inserted as opaque data.
+On first launch, paste an HTTP or HTTPS URL and press **Ctrl+Enter** to send it. Use the request tabs to edit parameters, authentication, headers, the body, tests, and transport settings.
 
-A `multipart/form-data` body is generated from its schema: a `format: binary` property becomes a file part awaiting your selection, everything else a generated text value. A whole-body binary schema, or `application/octet-stream`, becomes a body file awaiting selection instead of blocking the operation.
+Useful shortcuts:
 
-**File > Update from spec…** re-reads a source and compares it against the open collection, matching operations by path, method, and `operationId`. Review shows what changed, what's new, and what the spec no longer defines, and you choose what to apply. Applying always keeps the existing request's id and tests; everything else is replaced from the fresh import, same as import always does — just scoped to the one operation and shown before it happens. Nothing is written to disk until you save.
+| Shortcut | Action |
+| --- | --- |
+| **Ctrl+Enter** | Send the current request |
+| **Ctrl+Shift+Enter** | Run tests against the retained response |
+| **Ctrl+S** | Save the whole collection |
+| **Ctrl+T** | Paste the clipboard into the bearer token field |
+| **Ctrl+F** | Find in the focused editor or response body |
 
-Parameters are expanded following the specification's supported style and `explode` rules, including object and array parameters in a query and the `label` and `matrix` path styles. Combinations with no defined form — an array of objects, for instance — are blocked rather than guessed. Variables substituted into a URL path encode structural characters such as `/`, `?`, `#`, and backslash, while preserving existing percent escapes and style punctuation. Base URL templates remain supported. Whole `.` and `..` path segments, including percent-encoded forms, are rejected before Send because URL parsing would silently normalize them.
+Sending does not save automatically. Duckie retains dirty drafts, and **Ctrl+S** saves the entire collection together.
 
-## Local files and secrets
+## Collections and secrets
 
-A collection contains `duckie.json`, `requests/`, `bodies/`, `tests/`, and `environments/`. Request IDs are stable; the manifest orders request-file references. JSON is UTF-8 with two-space indentation and LF endings. Managed JSON documents and text bodies are limited to 20 MiB each, and test sources to 1 MiB; reads stop at the limit plus one probe byte instead of allocating an oversized file. Save uses atomic file replacement, a recovery journal, and content-hash conflict checks. An external edit blocks overwrite; reload or save the draft into a new folder. Bringing Duckie back to the foreground re-checks the collection's files, so an edit made elsewhere is reported when you return rather than when you next save: the dialog lists what was added, removed or modified and which request each file belongs to, and offers to reload or to keep what you have. Fields Duckie does not recognize are preserved through save and reload, and a document carrying a higher `schemaVersion` than this build writes refuses to open rather than being resaved without the parts it cannot read.
+A collection is a normal folder containing a `duckie.json` manifest and separate files for requests, bodies, tests, and environments. That makes collections suitable for ordinary source control and collaboration.
 
-Tokens default to the current session. **Remember in secrets file** opts a value into `.duckie/secrets.json` on the next Save. Normal request definitions contain only a secret key binding. Secrets are scoped by environment; switching environments never reuses another environment's credentials. `secrets.example.json` contains empty keys and `.gitignore` excludes `/.duckie/`.
+Credentials are session-only unless you select **Remember in secrets file**. Remembered values go into `.duckie/secrets.json`, while shareable request definitions contain only secret-key bindings. The generated `.gitignore` excludes `/.duckie/`; do not share that directory. **Environments → Export secrets** deliberately creates a separate plaintext file, so handle that export accordingly.
 
-Share the public collection files through your normal tools, excluding `.duckie/`. **Environments → Export secrets** deliberately writes a separate plaintext file. Loading secrets creates session values until individually remembered. If a saved credential is replaced without remembering the replacement, the previously saved value remains on disk. File-upload paths are absolute and need reselection on another machine.
+Duckie detects external edits and prevents an older in-app copy from silently overwriting them. It also preserves fields it does not recognize when saving compatible collection files.
+
+## OpenAPI import
+
+Duckie imports Swagger 2.0 and OpenAPI 3.0, 3.1, and 3.2 JSON from a file or protected URL. It follows contained local references and same-origin remote references, supports common parameter serialization styles, and creates file inputs for binary and multipart bodies.
+
+Use **File → Update from spec…** to compare an imported collection with its source. Duckie shows changed, new, and removed operations before applying your choices, preserves existing request IDs and tests, and waits for you to save the collection.
+
+Cross-origin references are not fetched because credentials supplied for the specification must not be forwarded to another origin.
 
 ## Response tests
 
+Tests use a small synchronous JavaScript API:
+
 ```javascript
-test("returns a successful response", () => {
+test("returns a successful JSON response", () => {
   expect(response.status).toBe(200);
   expect(response.header("content-type")).toContain("application/json");
   expect(response.json()).toBeType("object");
 });
 ```
 
-`test(name, callback)` continues after assertion failures. `expect(value)` supports `toBe`, `toEqual`, `toContain`, `toBeType`, `toBeLessThan`, `toBeLessThanOrEqual`, `toBeGreaterThan`, and `toBeGreaterThanOrEqual`. `toEqual` compares JSON values without depending on object key order. `toBeType` recognizes JavaScript types plus `array` and `null`.
+`expect(value)` supports `toBe`, `toEqual`, `toContain`, `toBeType`, `toBeLessThan`, `toBeLessThanOrEqual`, `toBeGreaterThan`, and `toBeGreaterThanOrEqual`. The `response` object exposes `status`, `header(name)`, `headers(name)`, `text()`, `json()`, `bodySize`, and `durationMs`.
 
-`response` exposes `status`, `header(name)`, `headers(name)`, `text()`, `json()`, `bodySize`, and `durationMs`. `environment` contains public environment values; `request` is the redacted request summary. JSON parsing is lazy. Body access above 10 MiB reports a limit error; metadata assertions still work. HTTP 4xx/5xx are valid completed responses and can pass assertions.
+Tests run in a fresh native worker process with no filesystem, network, module loader, or Node.js API. Async callbacks are not supported. Process isolation is not an operating-system security sandbox.
 
-A failure reports the assertion message above the stack, and your test file evaluates as `tests.js` so its frames are distinguishable from the harness's. **Test results** turns the first `tests.js` frame into a **Go to line** button that selects that line in the Tests editor.
+## Development
 
-While a request is in flight the bar above the request shows elapsed time and bytes received, with a progress bar when the server declared a content length. A compressed body reports received and decoded separately, since those differ. Cancel stops it at any point.
-
-**Run tests / Ctrl+Shift+Enter** evaluates current source against the retained response without another HTTP request. One run, including tests, occupies the app's run slot. Test code runs in a fresh native worker process with a 2-second engine deadline, 64 MiB JS heap, 512 KiB stack, a parent watchdog, and a Windows Job Object with a 128 MiB process-memory cap. No filesystem, network, module loader, or Node.js API is exposed. Async callbacks are unsupported. Process isolation is not an OS security sandbox.
-
-## Verify
+Run the standard checks before submitting a change:
 
 ```powershell
 cargo fmt --all -- --check
@@ -91,14 +115,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Performance targets are measured separately against release binaries with the development `bench` feature. [PERFORMANCE.md](PERFORMANCE.md#measurement-setup) contains fixture generation and the full benchmark commands.
+Node.js is needed for the local development server and the two end-to-end tests that use it. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for current decisions and known defects, and [PERFORMANCE.md](PERFORMANCE.md) for reproducible benchmark procedures and measurements. [ARCHITECTURE.md](ARCHITECTURE.md) and [UI_DESIGN.md](UI_DESIGN.md) are historical design proposals rather than an introduction to the current product.
 
-Tests use deterministic loopback servers. They cover transport semantics, compressed-body limits, secret resolution, collection conflicts/recovery, import conversion, native UI rendering, real worker IPC, cancellation, and allocation failure. Two end-to-end tests need Node.js on `PATH`: they start `scripts/dev-server.mjs` on an ephemeral port and drive the shipped `examples/local-api` collection and the protected OpenAPI import all the way through send and assertion evaluation. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the remaining v1 work and [PERFORMANCE.md](PERFORMANCE.md) for measurements and release gates.
-
-The UI uses [eframe/egui](https://docs.rs/eframe/0.36.2/eframe/); assertions use [rquickjs](https://docs.rs/rquickjs/0.13.0/rquickjs/). Dependencies are fixed by `Cargo.lock`. Packaging gathers dependency metadata and available license notices into `THIRD_PARTY_NOTICES.md`.
+The UI uses [eframe/egui](https://docs.rs/eframe/0.36.2/eframe/), and response assertions use [rquickjs](https://docs.rs/rquickjs/0.13.0/rquickjs/). Dependencies are fixed by `Cargo.lock`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-Every third-party crate linked into the binaries declares a permissive license, and none is copyleft. Where a crate offers a choice, Duckie takes the permissive option: `self_cell` is used under Apache-2.0 rather than GPL-2.0-only. `epaint_default_fonts` embeds typefaces under OFL-1.1 and the Ubuntu Font Licence, which allow redistribution inside an application but not sale of the fonts by themselves. Re-check the generated `THIRD_PARTY_NOTICES.md` whenever `Cargo.lock` changes.
+Duckie is available under the [MIT License](LICENSE). The packaging script generates a third-party license notice for the dependencies included in a build.
