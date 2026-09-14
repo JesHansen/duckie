@@ -776,6 +776,11 @@ impl Duckie {
                 .collect();
             for (row, m) in plan.matches.iter().enumerate() {
                 if import.apply_updates[row] {
+                    // Hydrate first: if this draft hasn't been selected since the collection
+                    // opened, `existing.tests` is still an empty placeholder, and copying it
+                    // below would silently wipe out real, saved tests.
+                    let existing_id = self.drafts[m.existing_index].request.id.clone();
+                    self.ensure_loaded(&existing_id);
                     let mut fresh = draft.operations[m.operation_index].finish();
                     let existing = &self.drafts[m.existing_index].request;
                     fresh.id = existing.id.clone();
@@ -787,6 +792,10 @@ impl Duckie {
                         .collect();
                     self.drafts[m.existing_index].request = fresh;
                     self.drafts[m.existing_index].dirty = true;
+                    // `fresh.body` came straight from the spec, not a deferred placeholder, so
+                    // this draft must not be re-hydrated later — that would overwrite it with
+                    // the old stored body.
+                    self.drafts[m.existing_index].pending = false;
                 }
             }
             for (row, &j) in plan.additions.iter().enumerate() {
