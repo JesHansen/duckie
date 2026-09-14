@@ -534,7 +534,7 @@ impl Duckie {
         egui::Window::new(title).open(&mut open).default_size([880.0,570.0]).show(ctx,|ui|{
             match import.draft.as_mut() { None => {
                 ui.horizontal(|ui|{ui.selectable_value(&mut import.url_mode,false,"Local file");ui.selectable_value(&mut import.url_mode,true,"URL");});ui.separator();
-                ui.label("OpenAPI 3.0 / 3.1 / 3.2 JSON");
+                ui.label("Swagger 2.0 / OpenAPI 3.0 / 3.1 / 3.2 JSON");
                 ui.horizontal(|ui|{ui.add(egui::TextEdit::singleline(&mut import.source).desired_width(650.0).hint_text(if import.url_mode{"https://api.example.com/openapi.json"}else{"Choose an OpenAPI JSON file"}));if !import.url_mode && ui.button("Browse…").clicked()&& let Some(path)=rfd::FileDialog::new().add_filter("OpenAPI JSON",&["json"]).pick_file(){import.source=path.to_string_lossy().into_owned();}});
                 if import.url_mode{ui.collapsing("Authentication for this import only",|ui|{
                     ui.label("Bearer token");ui.add(egui::TextEdit::singleline(&mut import.bearer).password(true).desired_width(500.0));

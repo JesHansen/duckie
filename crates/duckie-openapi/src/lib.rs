@@ -700,6 +700,121 @@ fn server_urls(servers: &Value, base: &str) -> Vec<String> {
         })
         .collect()
 }
+fn swagger_server_urls(root: &Value, base: &str) -> Vec<String> {
+    let base_path = root["basePath"].as_str().unwrap_or("");
+    let source = as_url(base);
+    let host = root["host"].as_str().map(str::to_owned).or_else(|| {
+        source.as_ref().and_then(|url| {
+            url.host().map(|host| match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_string(),
+            })
+        })
+    });
+    let Some(host) = host else {
+        return vec![];
+    };
+    let schemes: Vec<_> = root["schemes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let schemes = if schemes.is_empty() {
+        vec![source.as_ref().map_or("https", |url| url.scheme())]
+    } else {
+        schemes
+    };
+    schemes
+        .into_iter()
+        .map(|scheme| format!("{scheme}://{host}{base_path}"))
+        .collect()
+}
+
+fn swagger_parameter_schema(parameter: &Value) -> Value {
+    if parameter["in"] == "body" {
+        return parameter["schema"].clone();
+    }
+    let mut schema = serde_json::Map::new();
+    for key in [
+        "type",
+        "format",
+        "items",
+        "default",
+        "enum",
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "example",
+    ] {
+        if let Some(value) = parameter.get(key) {
+            schema.insert(key.into(), value.clone());
+        }
+    }
+    Value::Object(schema)
+}
+
+fn swagger_request_body(root: &Value, operation: &Value, parameters: &[&Value]) -> Option<Value> {
+    let consumes = operation
+        .get("consumes")
+        .or_else(|| root.get("consumes"))
+        .and_then(Value::as_array);
+    let media_types: Vec<&str> = consumes
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if let Some(body) = parameters.iter().find(|p| p["in"] == "body") {
+        let media_types = if media_types.is_empty() {
+            vec!["application/json"]
+        } else {
+            media_types
+        };
+        let mut content = serde_json::Map::new();
+        for media in media_types {
+            let mut definition = json!({"schema": body["schema"].clone()});
+            if let Some(example) = body.get("x-example").or_else(|| body.get("example")) {
+                definition["example"] = example.clone();
+            }
+            content.insert(media.into(), definition);
+        }
+        return Some(json!({"required": body["required"], "content": content}));
+    }
+    let form: Vec<_> = parameters
+        .iter()
+        .filter(|p| p["in"] == "formData")
+        .collect();
+    if form.is_empty() {
+        return None;
+    }
+    let media_types = if media_types.is_empty() {
+        vec!["application/x-www-form-urlencoded"]
+    } else {
+        media_types
+    };
+    let mut properties = serde_json::Map::new();
+    let mut required = vec![];
+    for parameter in form {
+        let name = parameter["name"].as_str().unwrap_or("");
+        let mut schema = swagger_parameter_schema(parameter);
+        if schema["type"] == "file" {
+            schema["type"] = json!("string");
+            schema["format"] = json!("binary");
+        }
+        properties.insert(name.into(), schema);
+        if parameter["required"] == true {
+            required.push(Value::String(name.into()));
+        }
+    }
+    let schema = json!({"type":"object", "properties":properties, "required":required});
+    let content = media_types
+        .into_iter()
+        .map(|media| (media.to_owned(), json!({"schema":schema})))
+        .collect::<serde_json::Map<_, _>>();
+    Some(json!({"content":content}))
+}
 pub fn import_json(bytes: &[u8]) -> Result<ImportDraft> {
     if bytes.len() > 20 * MIB as usize {
         bail!("OpenAPI document exceeds 20 MiB");
@@ -722,18 +837,28 @@ pub fn import_value_based(
     base: &str,
     doc_bases: &BTreeMap<String, String>,
 ) -> Result<ImportDraft> {
-    let version = root["openapi"]
-        .as_str()
-        .context("Missing OpenAPI version (Swagger 2 is unsupported)")?
-        .to_string();
-    if !["3.0.", "3.1.", "3.2."]
-        .iter()
-        .any(|p| version.starts_with(p))
+    let (version, swagger_2) = if let Some(version) = root["openapi"].as_str() {
+        (version.to_owned(), false)
+    } else if root["swagger"] == "2.0" {
+        ("2.0".to_owned(), true)
+    } else {
+        bail!("Missing or unsupported OpenAPI/Swagger version")
+    };
+    if !swagger_2
+        && !["3.0.", "3.1.", "3.2."]
+            .iter()
+            .any(|p| version.starts_with(p))
     {
-        bail!("Unsupported OpenAPI version {version}; supported versions are 3.0, 3.1 and 3.2");
+        bail!(
+            "Unsupported OpenAPI version {version}; supported versions are Swagger 2.0 and OpenAPI 3.0, 3.1 and 3.2"
+        );
     }
     let sanitized_source = sanitize_source(base);
-    let mut servers = server_urls(&root["servers"], base);
+    let mut servers = if swagger_2 {
+        swagger_server_urls(&root, base)
+    } else {
+        server_urls(&root["servers"], base)
+    };
     if servers.is_empty() {
         servers.push(String::new());
     }
@@ -784,11 +909,18 @@ pub fn import_value_based(
             let operation_servers = server_urls(&operation["servers"], item_base);
             let path_servers = server_urls(&item["servers"], item_base);
             let server = operation_servers.first().or(path_servers.first());
+            let swagger_base_path =
+                if swagger_2 && root["host"].as_str().is_none() && draft.servers[0].is_empty() {
+                    root["basePath"].as_str().unwrap_or("")
+                } else {
+                    ""
+                };
             request.url = format!(
-                "{}{}",
+                "{}{}{}",
                 server
                     .map(|s| s.trim_end_matches('/'))
                     .unwrap_or("{{env.baseUrl}}"),
+                swagger_base_path.trim_end_matches('/'),
                 path
             );
             request.extra.insert("x-openapi".into(),json!({"version":draft.version,"path":path,"method":method,"operationId":operation["operationId"],"source":sanitized_source}));
@@ -812,8 +944,19 @@ pub fn import_value_based(
                     Err(e) => request.blockers.push(e.to_string()),
                 }
             }
+            let swagger_parameters: Vec<_> = parameters.values().copied().collect();
             for ((location, name), parameter) in parameters {
-                let schema = match deref(&root, &parameter["schema"]) {
+                if swagger_2 && matches!(location, "body" | "formData") {
+                    continue;
+                }
+                let swagger_schema;
+                let schema_source = if swagger_2 {
+                    swagger_schema = swagger_parameter_schema(parameter);
+                    &swagger_schema
+                } else {
+                    &parameter["schema"]
+                };
+                let schema = match deref(&root, schema_source) {
                     Ok(s) => s,
                     Err(e) => {
                         request.blockers.push(e.to_string());
@@ -823,6 +966,7 @@ pub fn import_value_based(
                 let example = parameter
                     .get("example")
                     .cloned()
+                    .or_else(|| parameter.get("x-example").cloned())
                     .or_else(|| {
                         parameter["examples"]
                             .as_object()
@@ -833,15 +977,21 @@ pub fn import_value_based(
                     .or_else(|| schema.get("example").cloned())
                     .or_else(|| schema.get("default").cloned())
                     .or_else(|| schema["enum"].as_array().and_then(|a| a.first()).cloned());
+                let swagger_collection = parameter["collectionFormat"].as_str();
                 let style = parameter["style"]
                     .as_str()
-                    .unwrap_or(if location == "query" {
-                        "form"
-                    } else {
-                        "simple"
+                    .unwrap_or(match swagger_collection {
+                        Some("ssv") => "spaceDelimited",
+                        Some("pipes") => "pipeDelimited",
+                        _ if location == "query" => "form",
+                        _ => "simple",
                     });
                 // `form` is the only style whose default is to explode.
-                let explode = parameter["explode"].as_bool().unwrap_or(style == "form");
+                let explode = parameter["explode"].as_bool().unwrap_or(if swagger_2 {
+                    swagger_collection == Some("multi")
+                } else {
+                    style == "form"
+                });
                 let array = schema["type"] == "array";
                 // A referenced item schema still has to be inspected: an array of objects has no
                 // delimited form, so it must be blocked rather than emitted as a blank row.
@@ -939,7 +1089,11 @@ pub fn import_value_based(
                     let mut blockers = vec![];
                     if let Some(requirement) = requirement.as_object() {
                         for key in requirement.keys() {
-                            let scheme = &root["components"]["securitySchemes"][key];
+                            let scheme = if swagger_2 {
+                                &root["securityDefinitions"][key]
+                            } else {
+                                &root["components"]["securitySchemes"][key]
+                            };
                             match (scheme["type"].as_str(), scheme["scheme"].as_str()) {
                                 (Some("http"), Some(s)) if s.eq_ignore_ascii_case("bearer") => {
                                     if auth.bearer.is_some() {
@@ -989,7 +1143,10 @@ pub fn import_value_based(
             }
             request.auth = auth_options[0].1.clone();
             let mut bodies = vec![];
-            if let Some(body) = operation.get("requestBody") {
+            let swagger_body = swagger_2
+                .then(|| swagger_request_body(&root, operation, &swagger_parameters))
+                .flatten();
+            if let Some(body) = operation.get("requestBody").or(swagger_body.as_ref()) {
                 match deref(&root, body) {
                     Err(e) => request.blockers.push(e.to_string()),
                     Ok(body) => {
@@ -1261,6 +1418,76 @@ mod tests {
             assert!(r.tests.file.is_empty());
             assert_eq!(draft.operations[0].diagnostics.len(), 1);
         }
+    }
+    #[test]
+    fn swagger_2_imports_server_parameters_body_and_security() {
+        let root = json!({
+            "swagger":"2.0",
+            "info":{"title":"Legacy API","version":"1"},
+            "schemes":["https"], "host":"api.example.test", "basePath":"/v1",
+            "consumes":["application/json"],
+            "securityDefinitions":{"key":{"type":"apiKey","in":"header","name":"X-Key"}},
+            "security":[{"key":[]}],
+            "paths":{"/pets/{id}":{"post":{
+                "operationId":"updatePet",
+                "parameters":[
+                    {"name":"id","in":"path","required":true,"type":"string","x-example":"spot"},
+                    {"name":"tags","in":"query","type":"array","items":{"type":"string"},"collectionFormat":"multi","x-example":["a","b"]},
+                    {"name":"pet","in":"body","required":true,"schema":{"$ref":"#/definitions/Pet"}}
+                ]
+            }}},
+            "definitions":{"Pet":{"type":"object","properties":{"name":{"type":"string","default":"Duck"}}}}
+        });
+        let draft = import_json(&serde_json::to_vec(&root).unwrap()).unwrap();
+        assert_eq!(draft.version, "2.0");
+        assert_eq!(draft.servers, ["https://api.example.test/v1"]);
+        let request = draft.operations[0].finish();
+        assert_eq!(request.url, "{{env.baseUrl}}/pets/{{request.id}}");
+        assert_eq!(request.query.len(), 2);
+        assert!(request.auth.api_key.is_some());
+        let Body::Json { text } = request.body else {
+            panic!("expected a JSON body")
+        };
+        assert!(text.contains("Duck"));
+    }
+
+    #[test]
+    fn swagger_2_imports_form_data_files() {
+        let root = json!({
+            "swagger":"2.0", "info":{"title":"Upload","version":"1"},
+            "consumes":["multipart/form-data"],
+            "paths":{"/upload":{"post":{"parameters":[
+                {"name":"caption","in":"formData","type":"string","required":true},
+                {"name":"photo","in":"formData","type":"file","required":true}
+            ]}}}
+        });
+        let request = import_json(&serde_json::to_vec(&root).unwrap())
+            .unwrap()
+            .operations[0]
+            .finish();
+        let Body::Multipart { parts } = request.body else {
+            panic!("expected multipart body")
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(parts.iter().any(|part| part.name == "photo" && part.file));
+    }
+    #[test]
+    fn swagger_2_defaults_missing_host_to_the_source_origin() {
+        let root = json!({
+            "swagger":"2.0", "info":{"title":"API","version":"1"},
+            "basePath":"/v2", "paths":{"/pets":{"get":{}}}
+        });
+        let remote = import_value_based(
+            root.clone(),
+            "http://localhost:8080/spec/swagger.json",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(remote.servers, ["http://localhost:8080/v2"]);
+
+        let local = import_value_based(root, "C:/spec/swagger.json", &BTreeMap::new()).unwrap();
+        assert_eq!(local.servers, [""]);
+        assert_eq!(local.operations[0].request.url, "{{env.baseUrl}}/v2/pets");
     }
     #[test]
     fn security_alternatives_are_not_flattened() {
