@@ -1,13 +1,15 @@
 # Builds the Windows icon resources from a single square PNG.
 #
-#   ./scripts/make-icon.ps1 [-Source path\to\duckie.png]
+#   ./scripts/make-icon.ps1 [-Source path\to\duckie.png] [-IconName duckie.ico] [-SkipWindowIcon]
 #
 # Produces assets/duckie.ico, which the build script compiles into duckie.exe so Explorer and a
 # pinned taskbar shortcut have an icon, and assets/window-icon.rgba, the straight-alpha pixels the
 # running window sets on itself. Both are committed; rerun this only when the artwork changes.
 param(
     [string]$Source = 'assets/duckie.png',
-    [string]$OutputDirectory = 'assets'
+    [string]$OutputDirectory = 'assets',
+    [string]$IconName = 'duckie.ico',
+    [switch]$SkipWindowIcon
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -107,15 +109,18 @@ try {
     }
     foreach ($entry in $entries) { $writer.Write($entry.Data) }
     $writer.Flush()
-    [System.IO.File]::WriteAllBytes((Join-Path $OutputDirectory 'duckie.ico'), $ico.ToArray())
+    [System.IO.File]::WriteAllBytes((Join-Path $OutputDirectory $IconName), $ico.ToArray())
 
-    # The window icon wants straight RGBA, not the BGRA GDI+ produced.
-    for ($i = 0; $i -lt $window.Length; $i += 4) {
-        $blue = $window[$i]; $window[$i] = $window[$i + 2]; $window[$i + 2] = $blue
+    if (-not $SkipWindowIcon) {
+        # The window icon wants straight RGBA, not the BGRA GDI+ produced.
+        for ($i = 0; $i -lt $window.Length; $i += 4) {
+            $blue = $window[$i]; $window[$i] = $window[$i + 2]; $window[$i + 2] = $blue
+        }
+        [System.IO.File]::WriteAllBytes((Join-Path $OutputDirectory 'window-icon.rgba'), $window)
     }
-    [System.IO.File]::WriteAllBytes((Join-Path $OutputDirectory 'window-icon.rgba'), $window)
     $original.Dispose()
 
-    Get-ChildItem (Join-Path $OutputDirectory 'duckie.ico'), (Join-Path $OutputDirectory 'window-icon.rgba') |
-        Select-Object Name, Length
+    $outputs = @((Join-Path $OutputDirectory $IconName))
+    if (-not $SkipWindowIcon) { $outputs += (Join-Path $OutputDirectory 'window-icon.rgba') }
+    Get-ChildItem $outputs | Select-Object Name, Length
 } finally { Pop-Location }
