@@ -521,6 +521,11 @@ impl Duckie {
         if self.drafts[self.selected].pending {
             let id = self.drafts[self.selected].request.id.clone();
             self.ensure_loaded(&id);
+            if self.drafts[self.selected].pending {
+                self.drafts[self.selected].error =
+                    format!("Could not load request content before sending: {}", self.status);
+                return;
+            }
         }
         let env = self.snapshot();
         let d = &self.drafts[self.selected];
