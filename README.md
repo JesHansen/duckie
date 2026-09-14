@@ -75,6 +75,8 @@ Useful shortcuts:
 
 Sending does not save automatically. Duckie retains dirty drafts, and **Ctrl+S** saves the entire collection together.
 
+Use **Request → Preview prepared request** to resolve the current draft without sending it. The preview shows Duckie-prepared URL, headers, body representation, environment, and template-value sources. Secrets are masked. File bodies show bounded content and metadata.
+
 Use **File → Paste cURL from clipboard** to replace the current draft with a reviewable import. Duckie supports URLs, methods, repeated headers, textual `--data` forms, URL-encoded bodies, multipart fields, and file references. Unsupported cURL options stop the import. **Request → Copy as cURL** offers POSIX and PowerShell syntax; exports redact common credential headers unless you deliberately choose a “with credentials” action.
 
 New requests allow 10 minutes by default, including connection setup and response transfer. You can change the timeout and the encoded and decoded response-size limits per request under **Settings**.
@@ -111,6 +113,12 @@ test("returns a successful JSON response", () => {
 
 Tests run in a fresh native worker process with no filesystem, network, module loader, or Node.js API. Async callbacks are not supported. Process isolation is not an operating-system security sandbox.
 
+Response JSON and header rows can insert editable assertion snippets into the Tests tab. Generated JSON assertions use RFC 6901 pointers and include that path in mismatch output. Buttons that use observed status, value, array length, or duration label the resulting expectation so you can decide whether it is a real contract.
+
+Use **Request → Run requests…** to review and sequentially execute the selected request, its folder, or the collection. Choose whether to stop at the first failure; cancellation stops the active operation and prevents later requests from starting. The final table distinguishes assertion and execution failures and can export JSON, JUnit XML, or standalone HTML.
+
+The response **Compare** tab compares the current result with another retained result or an explicitly saved baseline. It reports status, header, bounded text, and structural JSON changes. JSON object order is insignificant, array order remains significant, and comma-separated RFC 6901 pointers can ignore volatile fields. Baseline files contain response data and are limited to 2 MiB.
+
 ## Headless execution
 
 Build the workspace, then run one saved request by ID or exact name:
@@ -119,7 +127,7 @@ Build the workspace, then run one saved request by ID or exact name:
 .\target\release\duckie-cli.exe run --collection .\examples\local-api --request "Echo a request" --environment dev
 ```
 
-Omit `--request` (or pass `--suite`) to run every request sequentially in manifest order. Add `--format json` for machine-readable output. Duckie does not change collection files during a CLI run. It reads the selected environment and local secrets file; a process environment variable named `DUCKIE_SECRET_name` overrides secret `name`, and `DUCKIE_SECRET_group__name` addresses `group.name` without putting its value in command-line arguments.
+Omit `--request` (or pass `--suite`) to run every request sequentially in manifest order. Add `--format json` for machine-readable output. `--report result.json`, `--report result.xml`, or `--report result.html` writes a portable JSON, JUnit, or HTML artifact. Reports contain summaries by default; `--include-response-snippets` explicitly adds bounded snippets, which can contain sensitive response data. Known collection secrets are redacted from those snippets. Duckie does not change collection files during a CLI run. It reads the selected environment and local secrets file; a process environment variable named `DUCKIE_SECRET_name` overrides secret `name`, and `DUCKIE_SECRET_group__name` addresses `group.name` without putting its value in command-line arguments.
 
 Exit code 0 means success, 1 means an assertion or suite failure, 2 means configuration or execution failure, and 3 means cancellation. Keep `duckie-test-worker.exe` beside `duckie-cli.exe` when requests have tests.
 

@@ -170,6 +170,7 @@ pub enum RequestTab {
 pub enum ResponseTab {
     Body,
     Json,
+    Compare,
     Headers,
     Tests,
     Details,
@@ -247,6 +248,7 @@ pub enum IoEvent {
     Message(Result<String>),
     Secrets(Result<SecretsFile>),
     DiskChanged(Vec<(String, duckie_storage::Change)>),
+    SuiteFinished(Vec<duckie_app::HeadlessReport>),
 }
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Preferences {
@@ -300,6 +302,15 @@ pub struct ImportUi {
     pub apply_additions: Vec<bool>,
     pub apply_removals: Vec<bool>,
 }
+#[derive(Default)]
+pub struct SuiteUi {
+    pub open: bool,
+    pub scope: u8,
+    pub stop_on_failure: bool,
+    pub running: bool,
+    pub cancel: Option<CancellationToken>,
+    pub results: Vec<duckie_app::HeadlessReport>,
+}
 pub struct Duckie {
     #[cfg(feature = "bench")]
     pub bench: Option<crate::bench::Bench>,
@@ -343,6 +354,11 @@ pub struct Duckie {
     pub active_testing: bool,
     pub env_dialog: bool,
     pub import: Option<ImportUi>,
+    pub suite: SuiteUi,
+    pub request_preview: Option<Result<RequestPreview, String>>,
+    pub compare_target: String,
+    pub compare_ignored: String,
+    pub baseline: Option<duckie_app::Baseline>,
     pub pending: Option<Pending>,
     pub after_save: Option<Pending>,
     pub allow_close: bool,
@@ -419,6 +435,11 @@ impl Duckie {
             active_testing: false,
             env_dialog: false,
             import: None,
+            suite: SuiteUi::default(),
+            request_preview: None,
+            compare_target: String::new(),
+            compare_ignored: String::new(),
+            baseline: None,
             pending: None,
             after_save: None,
             allow_close: false,
@@ -627,6 +648,77 @@ impl Duckie {
             Err(error) => self.status = format!("Could not export cURL: {error}"),
         }
     }
+    pub fn refresh_request_preview(&mut self) {
+        let d = &self.drafts[self.selected];
+        self.request_preview = Some(
+            preview(
+                &d.request,
+                &self.snapshot(),
+                &RunBindings::default(),
+                d.revision,
+            )
+            .map_err(|e| e.to_string()),
+        );
+    }
+    pub fn start_suite(&mut self) {
+        if self.suite.running || self.active.is_some() {
+            return;
+        }
+        let selected_id = self.drafts[self.selected].request.id.clone();
+        let folder = self.drafts[self.selected].request.folder.clone();
+        let ids: Vec<_> = self
+            .drafts
+            .iter()
+            .filter(|d| match self.suite.scope {
+                0 => d.request.id == selected_id,
+                1 => d.request.folder == folder,
+                _ => true,
+            })
+            .map(|d| d.request.id.clone())
+            .collect();
+        for id in &ids {
+            self.ensure_loaded(id);
+            if self
+                .drafts
+                .iter()
+                .find(|d| &d.request.id == id)
+                .is_some_and(|d| d.pending)
+            {
+                self.status = "Could not hydrate every suite request".into();
+                return;
+            }
+        }
+        let requests = self
+            .drafts
+            .iter()
+            .filter(|d| ids.contains(&d.request.id))
+            .map(|d| (d.request.clone(), d.source.clone(), d.revision))
+            .collect();
+        let environment = self.snapshot();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let http = self.service.http();
+        let tx = self.io_tx.clone();
+        let ctx = self.ctx.clone();
+        let stop = self.suite.stop_on_failure;
+        self.suite.running = true;
+        self.suite.results.clear();
+        self.suite.cancel = Some(cancel);
+        self.status = format!("Running {} request(s)…", ids.len());
+        self.service.runtime().spawn(async move {
+            let reports = duckie_app::execute_headless_suite(
+                &http,
+                requests,
+                environment,
+                token,
+                stop,
+                false,
+            )
+            .await;
+            let _ = tx.send(IoEvent::SuiteFinished(reports)).await;
+            ctx.request_repaint();
+        });
+    }
     pub fn touch(&mut self) {
         let d = &mut self.drafts[self.selected];
         d.dirty = true;
@@ -634,7 +726,7 @@ impl Duckie {
         d.error.clear();
     }
     pub fn send(&mut self) {
-        if self.active.is_some() || self.service.busy() {
+        if self.active.is_some() || self.service.busy() || self.suite.running {
             return;
         }
         // Belt and suspenders: the per-frame check in `ui` already loads the selected draft
@@ -1013,6 +1105,12 @@ impl Duckie {
                         self.disk_dismissed.clone_from(&names);
                         self.disk_changes = changed;
                     }
+                }
+                IoEvent::SuiteFinished(reports) => {
+                    self.suite.running = false;
+                    self.suite.cancel = None;
+                    self.status = format!("Suite finished: {} result(s)", reports.len());
+                    self.suite.results = reports;
                 }
                 IoEvent::Message(result) => {
                     self.status = result.unwrap_or_else(|e| e.to_string());

@@ -480,6 +480,136 @@ pub struct PreparedRequest {
     pub proxy: ProxyMode,
     pub summary: RequestSummary,
 }
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VariableUse {
+    pub reference: String,
+    pub source: String,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPreview {
+    pub summary: RequestSummary,
+    pub body: String,
+    pub variables: Vec<VariableUse>,
+    pub note: String,
+}
+
+/// Uses the send preparation path, then retains only a redacted, display-safe projection.
+pub fn preview(
+    req: &RequestDefinition,
+    env: &EnvironmentSnapshot,
+    bindings: &RunBindings,
+    revision: u64,
+) -> Result<RequestPreview> {
+    let prepared = prepare(req, env, bindings, revision)?;
+    let redact = |input: &str| {
+        let mut value = input.to_owned();
+        for secret in env.secrets.values().filter(|s| !s.is_empty()) {
+            value = value.replace(secret, "[redacted]");
+            value = value.replace(
+                &url::form_urlencoded::byte_serialize(secret.as_bytes()).collect::<String>(),
+                "[redacted]",
+            );
+        }
+        value
+    };
+    let body = match &prepared.body {
+        Body::None => "No body".into(),
+        Body::Json { text } | Body::Text { text } => redact(text),
+        Body::Form { rows } => rows
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| format!("{}={}", redact(&r.name), redact(&r.value)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Body::Multipart { parts } => parts
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| {
+                if p.file {
+                    format!("{} = file {}", redact(&p.name), redact(&p.value))
+                } else {
+                    format!("{} = {}", redact(&p.name), redact(&p.value))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Body::File { path, content_type } => {
+            let metadata = std::fs::metadata(path)?;
+            let mut sample = vec![];
+            std::fs::File::open(path)?
+                .take(256)
+                .read_to_end(&mut sample)?;
+            format!(
+                "File: {path}\nContent-Type: {content_type}\nSize: {} bytes\nPreview: {}",
+                metadata.len(),
+                redact(&String::from_utf8_lossy(&sample))
+            )
+        }
+    };
+    let mut inputs = vec![req.url.as_str()];
+    inputs.extend(
+        req.query
+            .iter()
+            .flat_map(|r| [r.name.as_str(), r.value.as_str()]),
+    );
+    inputs.extend(
+        req.headers
+            .iter()
+            .flat_map(|r| [r.name.as_str(), r.value.as_str()]),
+    );
+    match &req.body {
+        Body::Json { text } | Body::Text { text } => inputs.push(text),
+        Body::Form { rows } => inputs.extend(
+            rows.iter()
+                .flat_map(|r| [r.name.as_str(), r.value.as_str()]),
+        ),
+        Body::Multipart { parts } => inputs.extend(
+            parts
+                .iter()
+                .flat_map(|p| [p.name.as_str(), p.value.as_str()]),
+        ),
+        Body::File { path, .. } => inputs.push(path),
+        Body::None => {}
+    }
+    let mut variables = vec![];
+    for input in inputs {
+        let mut rest = input;
+        while let Some(start) = rest.find("{{") {
+            let Some(end) = rest[start + 2..].find("}}") else {
+                break;
+            };
+            let reference = rest[start + 2..start + 2 + end].trim();
+            let source = reference
+                .split_once('.')
+                .map(|(ns, _)| match ns {
+                    "env" => format!("environment {}", env.name),
+                    "request" => "request variables / run bindings".into(),
+                    "secret" => "secret (masked)".into(),
+                    _ => "unknown namespace".into(),
+                })
+                .unwrap_or_else(|| "invalid reference".into());
+            if !variables
+                .iter()
+                .any(|v: &VariableUse| v.reference == reference)
+            {
+                variables.push(VariableUse {
+                    reference: reference.into(),
+                    source,
+                });
+            }
+            rest = &rest[start + end + 4..];
+        }
+    }
+    Ok(RequestPreview {
+        summary: prepared.summary,
+        body,
+        variables,
+        note: "Application-prepared values; the HTTP library may add transport headers.".into(),
+    })
+}
 pub fn prepare(
     req: &RequestDefinition,
     env: &EnvironmentSnapshot,
@@ -1157,6 +1287,32 @@ mod tests {
                 1
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn request_preview_reuses_preparation_and_never_exposes_secrets() {
+        let mut request = RequestDefinition {
+            url: "https://example.test/{{env.path}}?unused".into(),
+            body: Body::Json {
+                text: "{\"token\":\"{{secret.token}}\"}".into(),
+            },
+            ..Default::default()
+        };
+        request.query.clear();
+        let env = EnvironmentSnapshot {
+            name: "dev".into(),
+            values: [("path".into(), "ducks".into())].into(),
+            secrets: [("token".into(), "super-secret".into())].into(),
+        };
+        let result = preview(&request, &env, &RunBindings::default(), 7).unwrap();
+        assert!(result.summary.url.contains("ducks"));
+        assert!(!result.body.contains("super-secret"));
+        assert!(result.body.contains("[redacted]"));
+        assert!(
+            result
+                .variables
+                .iter()
+                .any(|v| v.reference == "secret.token" && v.source == "secret (masked)")
         );
     }
     #[test]

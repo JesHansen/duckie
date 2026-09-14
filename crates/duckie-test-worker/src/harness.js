@@ -27,12 +27,22 @@
     if (input.body === null) throw new Error('Body unavailable at this limit: complete body exceeds 10 MiB');
     return input.body;
   };
+  const json = () => { if (!hasParsed) { parsed = parse(body()); hasParsed = true; } return parsed; };
+  const jsonPointer = pointer => {
+    if (pointer === '') return json();
+    if (typeof pointer !== 'string' || !pointer.startsWith('/')) throw new Error('JSON Pointer must be empty or start with /');
+    return pointer.slice(1).split('/').reduce((value, part) => {
+      const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
+      if (value === null || typeof value !== 'object' || !Object.hasOwn(value, key)) throw new Error(`JSON Pointer not found: ${pointer}`);
+      return value[key];
+    }, json());
+  };
   Object.defineProperty(globalThis, 'response', { value: freeze({
     status: input.status, bodySize: input.bodySize, durationMs: input.durationMs,
     header: name => { const row = input.headers.find(h => h[0].toLowerCase() === String(name).toLowerCase()); return row ? row[1] : null; },
     headers: name => input.headers.filter(h => h[0].toLowerCase() === String(name).toLowerCase()).map(h => h[1]),
     text: body,
-    json: () => { if (!hasParsed) { parsed = parse(body()); hasParsed = true; } return parsed; }
+    json, jsonPointer
   }) });
   Object.defineProperty(globalThis, 'environment', { value: freeze(input.environment) });
   Object.defineProperty(globalThis, 'request', { value: freeze(input.request) });
@@ -42,8 +52,8 @@
     const ka = Object.keys(a), kb = Object.keys(b);
     return ka.length === kb.length && ka.every(k => Object.hasOwn(b, k) && deepEqual(a[k], b[k]));
   };
-  Object.defineProperty(globalThis, 'expect', { value: actual => {
-    const check = (ok, expected, operator) => { if (!ok) throw new Error(`Assertion failed (${operator})\nExpected: ${display(expected)}\nReceived: ${display(actual)}`); };
+  Object.defineProperty(globalThis, 'expect', { value: (actual, path) => {
+    const check = (ok, expected, operator) => { if (!ok) throw new Error(`Assertion failed (${operator})${path ? `\nPath: ${bounded(path)}` : ''}\nExpected: ${display(expected)}\nReceived: ${display(actual)}`); };
     const numeric = (expected, predicate, operator) => check(typeof actual === 'number' && typeof expected === 'number' && predicate(actual, expected), expected, operator);
     return {
       toBe: expected => check((actual === null || typeof actual !== 'object') && actual === expected, expected, 'toBe'),

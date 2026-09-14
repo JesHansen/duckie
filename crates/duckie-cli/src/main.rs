@@ -16,6 +16,8 @@ struct Options {
     request: Option<String>,
     environment: String,
     format: Format,
+    report: Option<PathBuf>,
+    include_response_snippets: bool,
 }
 fn result_code(reports: &[HeadlessReport], cancelled: bool) -> i32 {
     if cancelled {
@@ -34,13 +36,15 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options> {
     let _ = args.next();
     if args.next().as_deref() != Some("run") {
         bail!(
-            "Usage: duckie-cli run --collection PATH [--request ID_OR_NAME] --environment NAME [--format text|json]"
+            "Usage: duckie-cli run --collection PATH [--request ID_OR_NAME] --environment NAME [--format text|json] [--report FILE.json|FILE.xml|FILE.html] [--include-response-snippets]"
         );
     }
     let mut collection = None;
     let mut request = None;
     let mut environment = None;
     let mut format = Format::Text;
+    let mut report = None;
+    let mut include_response_snippets = false;
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -58,6 +62,8 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options> {
                 }
             }
             "--suite" => {}
+            "--report" => report = Some(PathBuf::from(value()?)),
+            "--include-response-snippets" => include_response_snippets = true,
             other => bail!("Unknown option: {other}"),
         }
     }
@@ -66,6 +72,8 @@ fn options(args: impl IntoIterator<Item = String>) -> Result<Options> {
         request,
         environment: environment.context("--environment is required")?,
         format,
+        report,
+        include_response_snippets,
     })
 }
 
@@ -142,7 +150,7 @@ async fn run() -> Result<i32> {
                 .iter()
                 .find(|r| r.definition.id == id)
                 .unwrap();
-            (stored.definition.clone(), stored.source.clone())
+            (stored.definition.clone(), stored.source.clone(), 0)
         })
         .collect();
     let snapshot = EnvironmentSnapshot {
@@ -155,6 +163,8 @@ async fn run() -> Result<i32> {
         requests,
         snapshot,
         cancel.clone(),
+        false,
+        options.include_response_snippets,
     )
     .await;
     let cancelled =
@@ -199,6 +209,21 @@ async fn run() -> Result<i32> {
             }
         }
     }
+    if let Some(path) = &options.report {
+        let content = match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("xml") => duckie_app::junit(&reports),
+            Some("html") | Some("htm") => duckie_app::html(&reports),
+            Some("json") => serde_json::to_string_pretty(&reports)?,
+            _ => bail!("Report path must end in .json, .xml, or .html"),
+        };
+        std::fs::write(path, content)
+            .with_context(|| format!("Cannot write report {}", path.display()))?;
+    }
     Ok(result_code(&reports, cancelled))
 }
 
@@ -235,9 +260,13 @@ mod tests {
         let report = |outcome, error, tests| HeadlessReport {
             request_id: "r".into(),
             request_name: "R".into(),
+            environment: "dev".into(),
+            revision: 0,
             outcome,
             status: Some(200),
             duration_ms: 1,
+            response_bytes: 0,
+            response_snippet: None,
             tests,
             error,
         };

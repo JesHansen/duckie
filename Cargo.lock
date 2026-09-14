@@ -860,6 +860,7 @@ dependencies = [
  "duckie-model",
  "duckie-tests",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]

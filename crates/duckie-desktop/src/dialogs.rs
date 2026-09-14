@@ -304,6 +304,49 @@ async fn acquire_remote(
 
 impl Duckie {
     pub fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.suite.open {
+            self.suite_dialog(ctx);
+        }
+        if self.request_preview.is_some() {
+            let mut open = true;
+            egui::Window::new("Prepared request preview")
+                .open(&mut open)
+                .default_width(680.0)
+                .show(ctx, |ui| match self.request_preview.as_ref().unwrap() {
+                    Ok(preview) => {
+                        ui.strong(format!(
+                            "{} {}",
+                            preview.summary.method, preview.summary.url
+                        ));
+                        ui.weak(&preview.note);
+                        ui.separator();
+                        ui.label(format!("Environment: {}", preview.summary.environment));
+                        ui.strong("Application-prepared headers");
+                        for (name, value) in &preview.summary.headers {
+                            ui.monospace(format!("{name}: {value}"));
+                        }
+                        ui.strong("Body representation");
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&preview.body).monospace())
+                                .selectable(true),
+                        );
+                        ui.strong("Variable sources");
+                        if preview.variables.is_empty() {
+                            ui.weak("No template variables used");
+                        }
+                        for item in &preview.variables {
+                            ui.label(format!("{{{{{}}}}} — {}", item.reference, item.source));
+                        }
+                    }
+                    Err(error) => {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        ui.weak("Correct the referenced request field, then preview again.");
+                    }
+                });
+            if !open {
+                self.request_preview = None;
+            }
+        }
         if self.env_dialog {
             self.environment_dialog(ctx);
         }
@@ -389,6 +432,28 @@ impl Duckie {
             ui.separator();ui.label("See README.md and IMPLEMENTATION_STATUS.md for coverage and release gates.");
         });
         }
+    }
+    fn suite_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = self.suite.open;
+        let selected = self.drafts[self.selected].request.clone();
+        egui::Window::new("Run requests").open(&mut open).default_width(720.0).show(ctx,|ui|{
+            ui.horizontal(|ui|{ui.selectable_value(&mut self.suite.scope,0,"Selected request");ui.selectable_value(&mut self.suite.scope,1,"Current folder");ui.selectable_value(&mut self.suite.scope,2,"Collection");});
+            ui.checkbox(&mut self.suite.stop_on_failure,"Stop on first failure");ui.weak(format!("Environment: {} · requests run sequentially with no retries",self.envs[self.env_index].name));
+            ui.separator();ui.strong("Operations");egui::ScrollArea::vertical().max_height(150.0).show(ui,|ui|for d in &self.drafts{let included=match self.suite.scope{0=>d.request.id==selected.id,1=>d.request.folder==selected.folder,_=>true};if included{ui.monospace(format!("{}  {}",d.request.method,d.request.address()));}});
+            ui.horizontal(|ui|{
+                if ui.add_enabled(!self.suite.running,egui::Button::new("Run")).clicked(){self.start_suite();}
+                if self.suite.running&&ui.button("Cancel").clicked()&&let Some(token)=&self.suite.cancel{token.cancel();}
+            });
+            if self.suite.running{ui.spinner();ui.label("Running…");}
+            if !self.suite.results.is_empty(){ui.separator();ui.strong("Results");egui::Grid::new("suite-results").striped(true).show(ui,|ui|{ui.weak("Result");ui.weak("Request");ui.weak("Status");ui.weak("Duration");ui.end_row();for r in &self.suite.results{let state=if r.execution_failed(){"ERROR"}else if r.assertion_failed(){"FAIL"}else{"PASS"};ui.label(state);ui.label(&r.request_name);ui.label(r.status.map_or("-".into(),|s|s.to_string()));ui.label(format!("{} ms",r.duration_ms));ui.end_row();}});ui.horizontal(|ui|{for (label,ext) in [("Export JSON…","json"),("Export JUnit…","xml"),("Export HTML…","html")]{if ui.button(label).clicked()&&let Some(path)=rfd::FileDialog::new().add_filter(ext,&[ext]).set_file_name(format!("duckie-report.{ext}")).save_file(){let content=match ext{"xml"=>duckie_app::junit(&self.suite.results),"html"=>duckie_app::html(&self.suite.results),_=>serde_json::to_string_pretty(&self.suite.results).unwrap_or_default()};self.status=match std::fs::write(&path,content){Ok(())=>format!("Saved report to {}",path.display()),Err(e)=>format!("Could not save report: {e}")};}}});ui.weak("Reports contain summaries by default; arbitrary response snippets require the CLI's explicit inclusion option.");}
+        });
+        if !open
+            && self.suite.running
+            && let Some(token) = &self.suite.cancel
+        {
+            token.cancel();
+        }
+        self.suite.open = open;
     }
     /// Reports files another program changed under the collection, and offers the only two
     /// honest choices: take what is on disk, or keep the in-memory version and deal with it at

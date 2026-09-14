@@ -166,6 +166,24 @@ mod tests {
         assert_eq!(r.tests[0].line, Some(2));
     }
     #[test]
+    fn json_pointer_assertions_report_the_failing_path() {
+        let r = evaluate(input(
+            "test('path',()=>expect(response.jsonPointer('/ok'), '/ok').toBe(false));",
+        ));
+        let error = r.tests[0].error.as_ref().unwrap();
+        assert!(error.contains("Path: /ok"), "{error}");
+        let missing = evaluate(input(
+            "test('missing',()=>response.jsonPointer('/missing'));",
+        ));
+        assert!(
+            missing.tests[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("JSON Pointer not found: /missing")
+        );
+    }
+    #[test]
     fn thrown_error_reports_helper_throw_site_line() {
         let r = evaluate(input(
             "function helper() {\n  throw new Error('boom');\n}\ntest('helper', () => {\n  helper();\n});",

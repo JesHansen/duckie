@@ -469,6 +469,10 @@ impl Duckie {
                 }
             } else if let Some((_, token, ..)) = &self.active {
                 token.cancel();
+            } else if self.suite.running
+                && let Some(token) = &self.suite.cancel
+            {
+                token.cancel();
             }
         }
     }
@@ -522,12 +526,20 @@ impl Duckie {
             ui.menu_button("Request", |ui| {
                 if ui
                     .add_enabled(
-                        self.active.is_none(),
+                        self.active.is_none() && !self.suite.running,
                         egui::Button::new("Send                         Ctrl+Enter"),
                     )
                     .clicked()
                 {
                     self.send();
+                    ui.close();
+                }
+                if ui.button("Preview prepared request").clicked() {
+                    self.refresh_request_preview();
+                    ui.close();
+                }
+                if ui.button("Run requests…").clicked() {
+                    self.suite.open = true;
                     ui.close();
                 }
                 if ui.button("Duplicate request").clicked() {
@@ -1141,6 +1153,10 @@ impl Duckie {
                         d.source.push_str(EXAMPLE);
                         changed = true;
                     }
+                    if let Some(view)=self.responses.get(&d.request.id) {
+                        if let Some(status)=view.result.status && ui.button(format!("Expect observed status {status}")).clicked(){d.source.push_str(&format!("\ntest(\"returns status {status}\", () => {{\n  expect(response.status).toBe({status});\n}});\n"));changed=true;}
+                        if ui.button("Expect duration under 1000 ms").clicked(){d.source.push_str("\ntest(\"responds within the chosen limit\", () => {\n  expect(response.durationMs).toBeLessThan(1000); // choose the contract limit\n});\n");changed=true;}
+                    }
                     run_tests = ui
                         .add_enabled(ready, egui::Button::new("Run tests"))
                         .on_hover_text("Does not send an HTTP request · Ctrl+Shift+Enter")
@@ -1254,6 +1270,18 @@ impl Duckie {
     }
     fn response(&mut self, ui: &mut egui::Ui) {
         let id = self.drafts[self.selected].request.id.clone();
+        let compare_candidates: Vec<_> = self
+            .responses
+            .iter()
+            .filter(|(other, _)| *other != &id)
+            .map(|(other, v)| {
+                (
+                    other.clone(),
+                    format!("{} · {}", v.result.summary.method, v.result.summary.url),
+                    v.result.clone(),
+                )
+            })
+            .collect();
         let Some(view) = self.responses.get_mut(&id) else {
             ui.label(RichText::new("Response").strong());
             ui.separator();
@@ -1326,6 +1354,7 @@ impl Duckie {
             for (tab, label) in [
                 (ResponseTab::Body, "Body"),
                 (ResponseTab::Json, "JSON tree"),
+                (ResponseTab::Compare, "Compare"),
                 (ResponseTab::Headers, "Headers"),
                 (ResponseTab::Tests, "Test results"),
                 (ResponseTab::Details, "Request details"),
@@ -1339,6 +1368,7 @@ impl Duckie {
         let mut location = None;
         let mut start_search = None;
         let mut go_to = None;
+        let mut assertion_snippet = None;
         match self.response_tab {
             ResponseTab::Body => {
                 let shown = if self.pretty {
@@ -1548,6 +1578,10 @@ impl Duckie {
                         if ui.button("Copy JSON Pointer").clicked() {
                             ui.ctx().copy_text(self.json_selected.clone());
                         }
+                        let sensitive=self.json_selected.to_ascii_lowercase().contains("token")||self.json_selected.to_ascii_lowercase().contains("password")||self.json_selected.to_ascii_lowercase().contains("secret");
+                        if ui.button("Assert type").clicked(){let kind=match selected{serde_json::Value::Null=>"null",serde_json::Value::Bool(_)=>"boolean",serde_json::Value::Number(_)=>"number",serde_json::Value::String(_)=>"string",serde_json::Value::Array(_)=>"array",serde_json::Value::Object(_)=>"object"};let p=serde_json::to_string(&self.json_selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON value has expected type\", () => {{\n  expect(response.jsonPointer({p}), {p}).toBeType(\"{kind}\");\n}});\n"));}
+                        if matches!(selected,serde_json::Value::Array(_))&&ui.button("Assert array length").clicked(){let len=selected.as_array().unwrap().len();let p=serde_json::to_string(&self.json_selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON array has expected length\", () => {{\n  expect(response.jsonPointer({p}).length, {p}).toBe({len});\n}});\n"));}
+                        if !sensitive&&ui.button("Assert observed value").clicked(){let p=serde_json::to_string(&self.json_selected).unwrap();let value=serde_json::to_string(selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON value matches the observed contract\", () => {{\n  expect(response.jsonPointer({p}), {p}).toEqual({value});\n}});\n"));}
                     });
                     ui.separator();
                     let rows = json_rows(json, &self.json_expanded);
@@ -1602,6 +1636,104 @@ impl Duckie {
                     ui.weak("JSON tree is available for valid complete JSON responses up to 2 MiB and 128 levels. Use Body for this response.");
                 }
             }
+            ResponseTab::Compare => {
+                ui.weak("Compare without sending. JSON object order is ignored; array order is significant.");
+                egui::ComboBox::from_id_salt("compare-target")
+                    .selected_text(if self.compare_target == "baseline" {
+                        "Saved baseline"
+                    } else {
+                        compare_candidates
+                            .iter()
+                            .find(|(id, _, _)| id == &self.compare_target)
+                            .map(|(_, name, _)| name.as_str())
+                            .unwrap_or("Choose retained response")
+                    })
+                    .show_ui(ui, |ui| {
+                        if self.baseline.is_some() {
+                            ui.selectable_value(
+                                &mut self.compare_target,
+                                "baseline".into(),
+                                "Saved baseline",
+                            );
+                        }
+                        for (id, name, _) in &compare_candidates {
+                            ui.selectable_value(&mut self.compare_target, id.clone(), name);
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    ui.label("Ignored JSON pointers");
+                    ui.text_edit_singleline(&mut self.compare_ignored);
+                });
+                ui.weak("Separate active ignore rules with commas.");
+                ui.horizontal(|ui| {
+                    if ui.button("Save current as baseline…").clicked()
+                        && let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Duckie baseline", &["json"])
+                            .set_file_name("response.baseline.json")
+                            .save_file()
+                    {
+                        match duckie_app::Baseline::from_result(&view.result).and_then(|b| {
+                            b.save(&path)?;
+                            Ok(b)
+                        }) {
+                            Ok(b) => {
+                                self.baseline = Some(b);
+                                self.compare_target = "baseline".into();
+                            }
+                            Err(e) => self.status = format!("Could not save baseline: {e}"),
+                        }
+                    }
+                    if ui.button("Load baseline…").clicked()
+                        && let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Duckie baseline", &["json"])
+                            .pick_file()
+                    {
+                        match duckie_app::Baseline::load(&path) {
+                            Ok(b) => {
+                                self.baseline = Some(b);
+                                self.compare_target = "baseline".into();
+                            }
+                            Err(e) => self.status = format!("Could not load baseline: {e}"),
+                        }
+                    }
+                });
+                let ignored = self
+                    .compare_ignored
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let comparison = if self.compare_target == "baseline" {
+                    self.baseline
+                        .as_ref()
+                        .map(|b| duckie_app::compare_baseline(&view.result, b, &ignored))
+                } else {
+                    compare_candidates
+                        .iter()
+                        .find(|(id, _, _)| id == &self.compare_target)
+                        .map(|(_, _, r)| duckie_app::compare(&view.result, r, &ignored))
+                };
+                if let Some(c) = comparison {
+                    if let Some((a, b)) = c.status {
+                        ui.label(format!("Status: {:?} → {:?}", a, b));
+                    }
+                    let empty =
+                        c.status.is_none() && c.headers.is_empty() && c.differences.is_empty();
+                    for h in &c.headers {
+                        ui.monospace(h);
+                    }
+                    for d in &c.differences {
+                        ui.monospace(d);
+                    }
+                    if empty {
+                        ui.label("No differences");
+                    }
+                    if c.truncated {
+                        ui.weak("Body comparison limited to the first 2 MiB.");
+                    }
+                }
+            }
             ResponseTab::Headers => {
                 egui::ScrollArea::both().show(ui, |ui| {
                     egui::Grid::new("response-headers")
@@ -1612,6 +1744,10 @@ impl Duckie {
                                 ui.add(egui::Label::new(value).selectable(true));
                                 if ui.small_button("Copy").clicked() {
                                     ui.ctx().copy_text(format!("{name}: {value}"));
+                                }
+                                if ui.small_button("Assert present").clicked() {
+                                    let literal=serde_json::to_string(name).unwrap();
+                                    assertion_snippet=Some(format!("\ntest(\"response includes header\", () => {{\n  expect(response.header({literal})).toBeType(\"string\");\n}});\n"));
                                 }
                                 ui.end_row();
                             }
@@ -1753,6 +1889,12 @@ impl Duckie {
                 )
             });
         }
+        if let Some(snippet) = assertion_snippet {
+            self.drafts[self.selected].source.push_str(&snippet);
+            self.drafts[self.selected].dirty = true;
+            self.drafts[self.selected].revision += 1;
+            self.request_tab = RequestTab::Tests;
+        }
         if let Some((base, value)) = location {
             match url_join(&base, &value) {
                 Ok(url) => {
@@ -1852,7 +1994,7 @@ impl eframe::App for Duckie {
         }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
-            && (self.dirty() || self.io_busy || self.active.is_some())
+            && (self.dirty() || self.io_busy || self.active.is_some() || self.suite.running)
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.active.is_some() {
@@ -1860,6 +2002,11 @@ impl eframe::App for Duckie {
                     token.cancel();
                 }
                 self.status = "Stopping active run. Close again when it finishes.".into();
+            } else if self.suite.running {
+                if let Some(token) = &self.suite.cancel {
+                    token.cancel();
+                }
+                self.status = "Stopping suite. Close again when it finishes.".into();
             } else if !self.io_busy {
                 self.pending = Some(Pending::Close);
             }
