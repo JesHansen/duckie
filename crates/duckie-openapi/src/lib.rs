@@ -1127,6 +1127,14 @@ pub fn import_value_based(
                             }
                         }
                     }
+                    // Duckie's auth editor supports only one scheme at a time; the request
+                    // preparer rejects both being set. Flag the combination here rather than
+                    // let the editor silently drop the API key the first time someone opens it.
+                    if auth.bearer.is_some() && auth.api_key.is_some() {
+                        blockers.push(
+                            "Combined bearer and API-key authentication is not supported; choose one".into(),
+                        );
+                    }
                     auth_options.push((
                         if labels.is_empty() {
                             "No authentication".into()
