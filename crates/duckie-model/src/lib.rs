@@ -483,6 +483,9 @@ pub fn prepare(
     bindings: &RunBindings,
     revision: u64,
 ) -> Result<PreparedRequest> {
+    if req.auth.bearer.is_some() && req.auth.api_key.is_some() {
+        bail!("Choose either bearer or API-key authentication, not both");
+    }
     if !req.blockers.is_empty() {
         bail!(
             "Resolve import issues in Settings before Send: {}",
@@ -885,6 +888,27 @@ mod tests {
         assert_eq!(p.url, r.address());
     }
     #[test]
+    fn address_includes_enabled_query_rows() {
+        let mut r = RequestDefinition {
+            url: "{{env.baseUrl}}/api/search".into(),
+            query: vec![
+                Row::new("param1", "var1"),
+                Row::new("param2", "var2"),
+                Row::new("param3", "var3"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            r.address(),
+            "{{env.baseUrl}}/api/search?param1=var1&param2=var2&param3=var3"
+        );
+        r.query[1].enabled = false;
+        assert_eq!(
+            r.address(),
+            "{{env.baseUrl}}/api/search?param1=var1&param3=var3"
+        );
+    }
+    #[test]
     fn redirect_query_cannot_acquire_secret_template_semantics() {
         let mut env = EnvironmentSnapshot {
             name: "dev".into(),
@@ -1124,5 +1148,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn mutually_exclusive_auth_is_enforced_during_preparation() {
+        let r = RequestDefinition {
+            url: "https://example.test".into(),
+            auth: Auth {
+                bearer: Some(SecretBinding {
+                    secret: "token".into(),
+                }),
+                api_key: Some(ApiKey {
+                    header: "X-API-Key".into(),
+                    secret: "key".into(),
+                }),
+            },
+            ..Default::default()
+        };
+        let error = prepare(
+            &r,
+            &EnvironmentSnapshot::default(),
+            &RunBindings::default(),
+            1,
+        )
+        .err()
+        .expect("two authentication schemes must be rejected");
+        assert!(error.to_string().contains("not both"));
     }
 }

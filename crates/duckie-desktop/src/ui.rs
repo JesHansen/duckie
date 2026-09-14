@@ -37,34 +37,42 @@ pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
             ui.weak("Value");
             ui.end_row();
             for (i, row) in rows.iter_mut().enumerate() {
-                ui.push_id(i, |ui| {
+                ui.push_id((i, "enabled"), |ui| {
                     changed |= ui
                         .checkbox(&mut row.enabled, "")
                         .on_hover_text("Include this row")
                         .changed();
-                    let edit = ui
-                        .add(
+                });
+                let edit = ui
+                    .push_id((i, "name"), |ui| {
+                        ui.add(
                             egui::TextEdit::singleline(&mut row.name)
                                 .desired_width(200.0)
                                 .hint_text("Name"),
                         )
                         .changed()
-                        | ui.add(
+                    })
+                    .inner
+                    | ui.push_id((i, "value"), |ui| {
+                        ui.add(
                             egui::TextEdit::singleline(&mut row.value)
                                 .desired_width((ui.available_width() - 48.0).max(180.0))
                                 .hint_text("Value"),
                         )
-                        .changed();
-                    if edit {
-                        row.raw = None;
-                        row.raw_is_literal = false;
-                        changed = true;
-                    }
+                        .changed()
+                    })
+                    .inner;
+                if edit {
+                    row.raw = None;
+                    row.raw_is_literal = false;
+                    changed = true;
+                }
+                ui.push_id((i, "remove"), |ui| {
                     if ui.small_button("×").on_hover_text("Remove row").clicked() {
                         remove = Some(i);
                     }
-                    ui.end_row();
                 });
+                ui.end_row();
             }
         });
     if let Some(index) = remove {
@@ -169,6 +177,28 @@ fn folder_of(request: &RequestDefinition) -> &str {
         folder
     }
 }
+
+/// Minimum room for the selected request editor. Row-based tabs grow with their contents so the
+/// request/response split cannot hide newly added parameters, headers, or authentication fields.
+fn request_pane_height(tab: RequestTab, request: &RequestDefinition) -> f32 {
+    const CHROME: f32 = 145.0;
+    const GRID_ROW: f32 = 32.0;
+    match tab {
+        RequestTab::Params => {
+            CHROME + 105.0 + GRID_ROW * (request.variables.len() + request.query.len()) as f32
+        }
+        RequestTab::Headers => CHROME + 80.0 + GRID_ROW * request.headers.len() as f32,
+        RequestTab::Auth => {
+            CHROME
+                + if request.auth.bearer.is_some() || request.auth.api_key.is_some() {
+                    155.0
+                } else {
+                    75.0
+                }
+        }
+        _ => 330.0,
+    }
+}
 impl Duckie {
     /// Groups the visible requests under their folders, in first-appearance order, which is the
     /// order the manifest stores and therefore the order the user controls.
@@ -261,6 +291,17 @@ impl Duckie {
         // active request without switching to the Auth tab and pasting by hand.
         if pressed(Modifiers::CTRL, Key::T) {
             self.request_tab = RequestTab::Auth;
+            // Request authentication is a single choice. Pasting the common bearer credential
+            // must never leave an API key enabled as a second, hidden authentication scheme.
+            if self.drafts[self.selected]
+                .request
+                .auth
+                .api_key
+                .take()
+                .is_some()
+            {
+                self.touch();
+            }
             if self.drafts[self.selected].request.auth.bearer.is_none() {
                 self.drafts[self.selected].request.auth.bearer = Some(SecretBinding {
                     secret: "internalBearer".into(),
@@ -715,23 +756,44 @@ impl Duckie {
                 let focus_token = self.focus_token;
                 self.focus_token = false;
                 let d = &mut self.drafts[self.selected];
-                let mut bearer = d.request.auth.bearer.is_some();
-                let mut api = d.request.auth.api_key.is_some();
+                // Bearer wins when opening a legacy request that enabled both schemes. This also
+                // repairs the draft so saving cannot preserve an impossible UI state.
+                if d.request.auth.bearer.is_some() && d.request.auth.api_key.take().is_some() {
+                    changed = true;
+                }
+                let mut mode = if d.request.auth.bearer.is_some() {
+                    1
+                } else if d.request.auth.api_key.is_some() {
+                    2
+                } else {
+                    0
+                };
+                let old_mode = mode;
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut bearer, "Bearer token").changed() {
-                        d.request.auth.bearer = bearer.then(|| SecretBinding {
-                            secret: "internalBearer".into(),
-                        });
-                        changed = true;
-                    }
-                    if ui.checkbox(&mut api, "API key header").changed() {
-                        d.request.auth.api_key = api.then(|| ApiKey {
-                            header: "X-API-Key".into(),
-                            secret: "apiKey".into(),
-                        });
-                        changed = true;
-                    }
+                    ui.label("Authentication");
+                    ui.radio_value(&mut mode, 0, "None");
+                    ui.radio_value(&mut mode, 1, "Bearer token");
+                    ui.radio_value(&mut mode, 2, "API key header");
                 });
+                if mode != old_mode {
+                    d.request.auth = match mode {
+                        1 => Auth {
+                            bearer: Some(SecretBinding {
+                                secret: "internalBearer".into(),
+                            }),
+                            api_key: None,
+                        },
+                        2 => Auth {
+                            bearer: None,
+                            api_key: Some(ApiKey {
+                                header: "X-API-Key".into(),
+                                secret: "apiKey".into(),
+                            }),
+                        },
+                        _ => Auth::default(),
+                    };
+                    changed = true;
+                }
                 let env = self.envs[self.env_index].name.clone();
                 if let Some(b) = &mut d.request.auth.bearer {
                     ui.add_space(8.0);
@@ -1678,11 +1740,15 @@ impl eframe::App for Duckie {
             self.prefs.sidebar_width = Some(panel.response.rect.width());
         }
         egui::CentralPanel::default().show(ui, |ui| {
+            let available = ui.available_height();
+            let content_height =
+                request_pane_height(self.request_tab, &self.drafts[self.selected].request);
+            let minimum = content_height.min((available - 170.0).max(220.0));
             let panel = egui::Panel::top("request-pane")
                 .resizable(true)
-                .default_size(self.prefs.request_height.unwrap_or(330.0))
-                .min_size(220.0)
-                .max_size((ui.available_height() - 170.0).max(220.0))
+                .default_size(self.prefs.request_height.unwrap_or(330.0).max(minimum))
+                .min_size(minimum)
+                .max_size((available - 170.0).max(minimum))
                 .show(ui, |ui| {
                     ui.add_enabled_ui(!self.io_busy, |ui| {
                         ui.push_id(self.drafts[self.selected].request.id.clone(), |ui| {
@@ -1840,9 +1906,17 @@ mod tests {
         app.request_tab = RequestTab::Params;
         app.clipboard_read = || Some("  eyJhbGciOi...\n".into());
         assert!(app.drafts[0].request.auth.bearer.is_none());
+        app.drafts[0].request.auth.api_key = Some(ApiKey {
+            header: "X-API-Key".into(),
+            secret: "old-api-key".into(),
+        });
 
         press_ctrl_t(&ctx, &mut app, &mut frame);
         assert!(app.request_tab == RequestTab::Auth);
+        assert!(
+            app.drafts[0].request.auth.api_key.is_none(),
+            "pasting a bearer token selects bearer authentication exclusively"
+        );
         // A bearer binding is created so there is a secret for the clipboard text to land in.
         let secret = app.drafts[0]
             .request
@@ -1884,6 +1958,29 @@ mod tests {
             Some("fresh-token")
         );
         assert!(app.drafts[0].dirty, "the secret's value did change");
+    }
+    #[test]
+    fn row_based_request_tabs_expand_the_request_pane() {
+        let mut request = RequestDefinition::default();
+        let empty_headers = request_pane_height(RequestTab::Headers, &request);
+        request.headers.extend([
+            Row::new("Accept", "application/json"),
+            Row::new("X-Trace", "one"),
+            Row::new("X-Debug", "two"),
+        ]);
+        assert_eq!(
+            request_pane_height(RequestTab::Headers, &request),
+            empty_headers + 3.0 * 32.0
+        );
+
+        let empty_params = request_pane_height(RequestTab::Params, &request);
+        request
+            .query
+            .extend([Row::new("param1", "var1"), Row::new("param2", "var2")]);
+        assert_eq!(
+            request_pane_height(RequestTab::Params, &request),
+            empty_params + 2.0 * 32.0
+        );
     }
     #[test]
     fn ctrl_t_falls_back_to_focusing_the_field_when_the_clipboard_has_no_text() {

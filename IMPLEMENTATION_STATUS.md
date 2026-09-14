@@ -31,6 +31,8 @@ Version bump to 1.0.0 validated on 13 September 2026 in the working tree: format
 
 Security-review hardening validated on 13 September 2026 in the working tree: `cargo fmt --all -- --check`, strict workspace Clippy, and all 109 non-measurement workspace tests passed; four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. `cargo audit 0.22.2` checked all 473 locked packages against RustSec database commit `b50980aad8b8f14f77e25a97b32dd94bf008b0af` (updated 9 September 2026) and reported no vulnerabilities or warnings. Release binaries, the portable ZIP, and performance gates were not rebuilt or remeasured for this change.
 
+Request-editor bug fixes validated on 14 September 2026 in the working tree: formatting, strict workspace Clippy, and all 112 non-measurement workspace tests passed (three new regressions); four performance measurements remained intentionally ignored. Both Node-backed end-to-end tests passed. Release binaries, the portable ZIP, and performance gates were not rebuilt or remeasured for this change.
+
 | Area | Recorded status | Remaining scope or qualification |
 | --- | --- | --- |
 | 1. Performance | Accepted for the agreed v1 scope | See PERFORMANCE.md. Cold launch has owner acceptance without a measured p95; CPU frame construction is only a lower bound on input-to-paint; reported GUI memory peaks exclude workers. |
@@ -52,7 +54,7 @@ Security-review hardening validated on 13 September 2026 in the working tree: `c
 - OpenAPI 3.0/3.1/3.2 JSON imports from local files or protected URLs into a review draft. Internal, contained local and same-origin remote references resolve transitively with rebasing. External acquisition is bounded at 50 attempts and 20 MiB; URL imports also share cancellation and a 60-second deadline. Import handles opaque examples, bounded placeholder generation, read-only omission, server precedence, security alternatives/combined requirements, `allOf` merges, and selectable `oneOf`/`anyOf` bodies.
 - Parameter serialization covers query `form`/`deepObject` objects and arrays, `spaceDelimited`/`pipeDelimited` arrays, and path `simple`/`label`/`matrix`, honoring supported `explode` combinations. Undefined forms such as arrays of objects remain blocked. URL path substitutions encode structural characters while preserving existing percent escapes and style punctuation; dot traversal segments are rejected before parsing.
 - The native UI includes dark/light/system themes, file dialogs, retained dirty drafts, grouped/collapsible folders and ordering, line-numbered editors, bounded syntax colouring, bracket matching, focused-editor find, and response snapshot labels. Editor undo buffers are not persisted.
-- **Ctrl+T** reads the clipboard directly (Win32 `OpenClipboard`/`GetClipboardData`, no clipboard crate) and pastes it into the request's bearer token secret, enabling bearer auth first if it has none — copy a token, press Ctrl+T, done. An empty or non-text clipboard falls back to switching to the Auth tab and focusing the token field for a manual paste.
+- **Request authentication** is one choice: none, bearer, or header API key. **Ctrl+T** reads the clipboard directly (Win32 `OpenClipboard`/`GetClipboardData`, no clipboard crate), selects bearer exclusively, and pastes into its secret — copy a token, press Ctrl+T, done. An empty or non-text clipboard falls back to switching to the Auth tab and focusing the token field for a manual paste.
 
 ## Remaining work, in priority order
 
