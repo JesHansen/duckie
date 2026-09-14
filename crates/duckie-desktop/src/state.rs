@@ -47,6 +47,15 @@ fn declared_charset(headers: &[(String, String)]) -> Option<String> {
         })
         .filter(|label| !label.is_empty())
 }
+/// How far a byte slice's UTF-8 validity reaches, distinguishing a genuinely invalid byte from a
+/// multi-byte character simply cut off where the slice ends — the latter is expected any time a
+/// preview reads or pages through a document in fixed-size chunks, not a sign of binary content.
+fn utf8_validity(bytes: &[u8]) -> (usize, bool) {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => (bytes.len(), false),
+        Err(e) => (e.valid_up_to(), e.error_len().is_some()),
+    }
+}
 fn decode_preview(
     bytes: &[u8],
     declared: Option<&str>,
@@ -61,10 +70,10 @@ fn decode_preview(
             Some(encoding.name().to_owned()),
         );
     }
+    let (_, invalid) = utf8_validity(bytes);
     (
         String::from_utf8_lossy(bytes).into_owned(),
-        !force_text
-            && (declared.is_some() || bytes.contains(&0) || std::str::from_utf8(bytes).is_err()),
+        !force_text && (declared.is_some() || bytes.contains(&0) || invalid),
         declared.map(str::to_owned),
     )
 }
@@ -590,10 +599,22 @@ impl Duckie {
             run_id,
             offset,
             result: (|| {
-                let bytes = body.read(offset, MIB)?;
+                let mut bytes = body.read(offset, MIB)?;
                 let declared = declared_charset(&headers);
                 let selected = charset_override.as_deref().or(declared.as_deref());
                 let forced = charset_override.is_some();
+                // `offset` is an arbitrary byte position from paging, not necessarily a character
+                // boundary. This alignment only makes sense for the plain-UTF-8 path below — a
+                // declared or overridden charset is decoded by `encoding_rs`, which tolerates a
+                // mid-character cut on its own.
+                if offset > 0 && selected.is_none() {
+                    // The leading bytes here are an orphaned tail with no lead byte to decode
+                    // against (that lead byte was on the previous page, which isn't re-read) —
+                    // drop them rather than let them read as invalid UTF-8 and misclassify the
+                    // whole response as binary.
+                    let skip = bytes.iter().take(3).take_while(|&&b| b & 0xC0 == 0x80).count();
+                    bytes.drain(..skip);
+                }
                 let (_, binary, charset) = decode_preview(&bytes, selected, forced);
                 let pretty = if offset == 0 && body.len() <= MIB {
                     serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -603,7 +624,12 @@ impl Duckie {
                     None
                 };
                 let page = page_size(&bytes);
-                let shown_len = (page as usize).min(bytes.len());
+                let mut shown_len = (page as usize).min(bytes.len());
+                // Likewise, trim the page slice back to a full character rather than cut one in
+                // half at the end — the dropped tail bytes reappear at the start of the next page.
+                if shown_len < bytes.len() && selected.is_none() {
+                    shown_len = utf8_validity(&bytes[..shown_len]).0;
+                }
                 // Decode only the selected page after using the larger sample for classification.
                 let shown = decode_preview(&bytes[..shown_len], selected, forced).0;
                 Ok(PreviewContent {
@@ -1130,5 +1156,17 @@ mod preview_tests {
         assert!(decode_preview(bytes, Some("made-up"), false).1);
         assert!(decode_preview(bytes, None, false).1);
         assert!(!decode_preview(bytes, None, true).1);
+    }
+
+    #[test]
+    fn a_multibyte_character_cut_off_at_a_slice_boundary_is_not_binary() {
+        // "café" — the trailing é is 2 bytes (0xC3 0xA9); slicing right after the lead byte
+        // leaves an incomplete-but-not-invalid sequence, which a page or chunk boundary can do.
+        let truncated = "café".as_bytes();
+        let cut = &truncated[..truncated.len() - 1];
+        assert!(std::str::from_utf8(cut).is_err());
+        assert!(!decode_preview(cut, None, false).1);
+        // A genuinely invalid byte (not just a truncated tail) must still be flagged.
+        assert!(decode_preview(b"caf\xff", None, false).1);
     }
 }
