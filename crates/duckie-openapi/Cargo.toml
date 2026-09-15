@@ -8,6 +8,6 @@ publish.workspace = true
 [dependencies]
 duckie-model.workspace = true
 serde_json.workspace = true
+serde-saphyr.workspace = true
 anyhow.workspace = true
 url.workspace = true
-

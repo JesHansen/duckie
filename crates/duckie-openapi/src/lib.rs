@@ -1,4 +1,4 @@
-//! OpenAPI JSON -> reviewable request drafts. Import never writes or executes requests.
+//! OpenAPI JSON/YAML -> reviewable request drafts. Import never writes or executes requests.
 use anyhow::{Context, Result, bail};
 use duckie_model::*;
 use serde_json::{Value, json};
@@ -27,6 +27,45 @@ pub const EXTERNAL: &str = "x-duckie-external";
 /// Aggregate ceilings on reference acquisition, so one import cannot walk a whole server.
 pub const MAX_EXTERNAL_DOCUMENTS: usize = 50;
 pub const MAX_EXTERNAL_BYTES: usize = 20 * MIB as usize;
+/// Keep the normalized JSON representation under the acquisition ceiling too, so YAML aliases
+/// cannot expand a small source into an unexpectedly large import tree.
+pub const MAX_NORMALIZED_DOCUMENT_BYTES: usize = 20 * MIB as usize;
+
+/// Parses one OpenAPI document as JSON first, then YAML. The YAML path is deliberately configured
+/// as a single bounded document: duplicate keys and unsupported tags fail, aliases have replay
+/// limits, and the resulting JSON-compatible tree has a separate expanded-size ceiling.
+pub fn parse_document(bytes: &[u8]) -> Result<Value> {
+    if let Ok(value) = serde_json::from_slice(bytes) {
+        return Ok(value);
+    }
+    let options = serde_saphyr::options! {
+        emit_comments: false,
+        reject_unsupported_tags: true,
+        budget: serde_saphyr::budget! {
+            max_documents: 1,
+            max_depth: 128,
+            max_events: 2_000_000,
+            max_nodes: 1_000_000,
+            max_total_scalar_bytes: MAX_NORMALIZED_DOCUMENT_BYTES,
+            max_recorded_anchor_bytes: MAX_NORMALIZED_DOCUMENT_BYTES,
+        },
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: 250_000,
+            max_replay_stack_depth: 64,
+            max_alias_expansions_per_anchor: 1_000,
+        },
+    };
+    let value: Value = serde_saphyr::from_slice_with_options(bytes, options)
+        .context("OpenAPI source must be valid JSON or YAML")?;
+    let normalized = serde_json::to_vec(&value).context("Cannot normalize OpenAPI YAML")?;
+    if normalized.len() > MAX_NORMALIZED_DOCUMENT_BYTES {
+        bail!(
+            "Normalized OpenAPI document exceeds {} MiB",
+            MAX_NORMALIZED_DOCUMENT_BYTES / MIB as usize
+        );
+    }
+    Ok(value)
+}
 // Parsed documents are shallow enough for this ceiling, while programmatically constructed or
 // merged Values do not get to turn this recursive metadata walk into a stack hazard.
 const MAX_EXAMPLE_METADATA_DEPTH: usize = 128;
@@ -1440,6 +1479,58 @@ pub fn plan_reimport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yaml_normalizes_into_the_existing_import_pipeline() {
+        let root = parse_document(
+            br#"
+openapi: 3.1.0
+info:
+  title: Weather
+  version: 1.0.0
+servers:
+  - url: https://weather.example.test
+paths:
+  /forecast/{city}:
+    get:
+      operationId: forecast
+      parameters:
+        - name: city
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Forecast
+"#,
+        )
+        .unwrap();
+        let draft = import_value_based(root, "weather.yaml", &BTreeMap::new()).unwrap();
+        assert_eq!(draft.version, "3.1.0");
+        assert_eq!(draft.operations.len(), 1);
+        assert_eq!(draft.operations[0].request.name, "forecast");
+        assert_eq!(draft.servers, ["https://weather.example.test"]);
+    }
+
+    #[test]
+    fn yaml_rejects_duplicate_keys_multiple_documents_and_unsupported_tags() {
+        for source in [
+            "openapi: 3.0.0\nopenapi: 3.1.0\n",
+            "openapi: 3.0.0\n---\nopenapi: 3.1.0\n",
+            "openapi: !include other.yaml\n",
+        ] {
+            assert!(parse_document(source.as_bytes()).is_err(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn yaml_alias_replay_is_bounded() {
+        let aliases = std::iter::repeat_n("  - *value\n", 1_001).collect::<String>();
+        let source = format!("value: &value x\naliases:\n{aliases}");
+        let error = format!("{:#}", parse_document(source.as_bytes()).unwrap_err());
+        assert!(error.contains("alias"), "{error}");
+    }
     #[test]
     fn all_versions_import_with_missing_path_values_and_no_tests() {
         for version in ["3.0.4", "3.1.2", "3.2.0"] {

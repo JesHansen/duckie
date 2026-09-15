@@ -177,6 +177,8 @@ All proposals preserve the local-only product contract: no account, telemetry, c
 
 ### 14. YAML OpenAPI and Swagger import
 
+**Implemented 15 September 2026.** Local files and explicitly selected URLs now accept bounded JSON or YAML roots and transitively referenced documents through one normalization boundary. YAML reuses existing local-containment, same-origin credential isolation, acquisition budgets, cancellation, provenance, review, and update behavior. The parser rejects duplicate keys, multiple documents, unsupported tags, non-JSON mapping shapes, excessive aliases/nesting, and normalized trees over 20 MiB. Eight downloaded real-world YAML documents passed the parser and importer, including the supplied Microsoft WeatherData OpenAPI 3.2 document, which produced two operations, one server, and no diagnostics; the validation details and limitations are recorded in `IMPLEMENTATION_STATUS.md`.
+
 **What to add.** Accept YAML specifications from local files and explicitly selected URLs, including supported referenced YAML files. Feed the normalized document into the existing review and import pipeline.
 
 **Why build it.** Duckie's documented import surface is JSON. Teams whose source specification is YAML need an extra conversion step before they can use the existing importer. Supporting their source format makes initial import and later updates easier without adding another API protocol or workflow model.

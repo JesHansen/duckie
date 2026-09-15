@@ -75,7 +75,7 @@ fn acquire_local(
         match read_bounded(&target, budget) {
             Ok(Some(bytes)) => {
                 budget -= bytes.len();
-                match serde_json::from_slice(&bytes) {
+                match duckie_openapi::parse_document(&bytes) {
                     Ok(document) => {
                         // A fetched document's own references are relative to it, not to the root.
                         pending.extend(external_references(&document, &uri));
@@ -260,10 +260,13 @@ async fn acquire_remote(
         let result = acquirer.fetch(&uri, budget).await?;
         budget = budget.saturating_sub(result.received);
         if let Some(bytes) = result.bytes {
-            if let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                pending.extend(external_references(&document, &uri));
-                pending_examples.extend(external_examples(&document, &uri));
-                fetched.insert(uri.clone(), document);
+            match duckie_openapi::parse_document(&bytes) {
+                Ok(document) => {
+                    pending.extend(external_references(&document, &uri));
+                    pending_examples.extend(external_examples(&document, &uri));
+                    fetched.insert(uri.clone(), document);
+                }
+                Err(error) => notes.push(format!("{uri}: {error}")),
             }
             contents.insert(uri, bytes);
         }
@@ -806,8 +809,8 @@ impl Duckie {
         egui::Window::new(title).open(&mut open).default_size([880.0,570.0]).show(ctx,|ui|{
             match import.draft.as_mut() { None => {
                 ui.horizontal(|ui|{ui.selectable_value(&mut import.url_mode,false,"Local file");ui.selectable_value(&mut import.url_mode,true,"URL");});ui.separator();
-                ui.label("Swagger 2.0 / OpenAPI 3.0 / 3.1 / 3.2 JSON");
-                ui.horizontal(|ui|{ui.add(egui::TextEdit::singleline(&mut import.source).desired_width(650.0).hint_text(if import.url_mode{"https://api.example.com/openapi.json"}else{"Choose an OpenAPI JSON file"}));if !import.url_mode && ui.button("Browse…").clicked()&& let Some(path)=rfd::FileDialog::new().add_filter("OpenAPI JSON",&["json"]).pick_file(){import.source=path.to_string_lossy().into_owned();}});
+                ui.label("Swagger 2.0 / OpenAPI 3.0 / 3.1 / 3.2 · JSON or YAML");
+                ui.horizontal(|ui|{ui.add(egui::TextEdit::singleline(&mut import.source).desired_width(650.0).hint_text(if import.url_mode{"https://api.example.com/openapi.yaml"}else{"Choose an OpenAPI JSON or YAML file"}));if !import.url_mode && ui.button("Browse…").clicked()&& let Some(path)=rfd::FileDialog::new().add_filter("OpenAPI",&["json","yaml","yml"]).pick_file(){import.source=path.to_string_lossy().into_owned();}});
                 if import.url_mode{ui.collapsing("Authentication for this import only",|ui|{
                     ui.label("Bearer token");ui.add(egui::TextEdit::singleline(&mut import.bearer).password(true).desired_width(500.0));
                     ui.horizontal(|ui|{ui.label("API key header");ui.text_edit_singleline(&mut import.api_header);ui.label("Value");ui.add(egui::TextEdit::singleline(&mut import.api_value).password(true));});ui.weak("Import credentials are never copied to generated requests.");
@@ -994,8 +997,7 @@ impl Duckie {
                             );
                         }
                         let bytes = response.body.read(0, 20 * MIB)?;
-                        let mut root: serde_json::Value = serde_json::from_slice(&bytes)
-                            .context("OpenAPI source must be valid JSON")?;
+                        let mut root = duckie_openapi::parse_document(&bytes)?;
                         let ((fetched, fetched_examples), mut notes) = acquire_remote(
                             &http,
                             &base,
@@ -1043,8 +1045,7 @@ impl Duckie {
                             .context("OpenAPI source has no containing folder")?;
                         let bytes = read_bounded(&canonical, 20 * MIB as usize)?
                             .context("OpenAPI file exceeds 20 MiB")?;
-                        let mut root: serde_json::Value = serde_json::from_slice(&bytes)
-                            .context("OpenAPI source must be valid JSON")?;
+                        let mut root = duckie_openapi::parse_document(&bytes)?;
                         let ((fetched, fetched_examples), mut notes) =
                             acquire_local(&base, root_path, &root);
                         let doc_bases = duckie_openapi::document_keys(&fetched);
@@ -1354,10 +1355,36 @@ mod tests {
         assert_eq!(examples.get(&uri).unwrap(), shared);
     }
 
+    #[test]
+    fn local_yaml_references_are_parsed_and_followed_transitively() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("paths.yaml"),
+            b"forecast:\n  get:\n    operationId: forecast\n    responses:\n      '200':\n        description: ok\ncomponents:\n  schemas:\n    weather:\n      $ref: schema.yml\n",
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("schema.yml"), b"type: object\n").unwrap();
+        let base = temp
+            .path()
+            .join("openapi.yaml")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root = serde_json::json!({"pathItem": {"$ref": "paths.yaml"}});
+
+        let ((documents, _), notes) =
+            acquire_local(&base, &std::fs::canonicalize(temp.path()).unwrap(), &root);
+
+        let paths = duckie_openapi::join_ref(&base, "paths.yaml");
+        let schema = duckie_openapi::join_ref(&paths, "schema.yml");
+        assert!(documents.contains_key(&paths), "{notes:?}");
+        assert!(documents.contains_key(&schema), "{notes:?}");
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
     #[tokio::test]
     async fn failed_remote_fetches_count_toward_the_attempt_limit() {
         let (origin, requests, _, server) =
-            remote_server(|_| (b"not json".to_vec(), Duration::ZERO)).await;
+            remote_server(|_| (b"\xff".to_vec(), Duration::ZERO)).await;
         let references: Vec<_> = (0..6)
             .map(|i| serde_json::json!({"$ref": format!("/bad-{i}.json")}))
             .collect();
@@ -1466,18 +1493,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_uri_can_supply_a_reference_and_an_example_with_one_request() {
-        let shared = br#"{"type":"string"}"#;
+    async fn remote_yaml_uri_can_supply_a_reference_and_an_example_with_one_request() {
+        let shared = b"type: string\n";
         let (origin, requests, _, server) =
             remote_server(move |_| (shared.to_vec(), Duration::ZERO)).await;
         let root = serde_json::json!({
             "components": {
-                "schemas": {"shared": {"$ref": "/shared.json"}},
-                "examples": {"shared": {"externalValue": "/shared.json"}}
+                "schemas": {"shared": {"$ref": "/shared.yaml"}},
+                "examples": {"shared": {"externalValue": "/shared.yaml"}}
             }
         });
         let base = format!("{origin}/openapi.json");
-        let uri = format!("{origin}/shared.json");
+        let uri = format!("{origin}/shared.yaml");
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let ((documents, examples), _) = acquire_remote(

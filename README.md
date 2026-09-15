@@ -28,7 +28,7 @@ test("returns the message", () => {
 - Compose HTTP requests with query parameters, headers, bodies, bearer tokens, and API keys.
 - Paste supported cURL commands into editable drafts and copy requests as redacted POSIX or PowerShell cURL commands.
 - Organize requests into local collections and environments that are easy to inspect and version.
-- Import Swagger 2.0 and OpenAPI 3.x JSON specifications, including multi-file specifications.
+- Import Swagger 2.0 and OpenAPI 3.x JSON or YAML specifications, including multi-file specifications.
 - Inspect text, JSON, binary, compressed, and large responses without leaving the app.
 - Navigate bounded JSON responses as a tree and copy values or RFC 6901 JSON Pointers.
 - Run JavaScript assertions against a response, or rerun them without sending the request again.
@@ -91,7 +91,9 @@ Duckie detects external edits and prevents an older in-app copy from silently ov
 
 ## OpenAPI import
 
-Duckie imports Swagger 2.0 and OpenAPI 3.0, 3.1, and 3.2 JSON from a file or protected URL. It follows contained local references and same-origin remote references, supports common parameter serialization styles, and creates file inputs for binary and multipart bodies.
+Duckie imports Swagger 2.0 and OpenAPI 3.0, 3.1, and 3.2 JSON or YAML from a file or protected URL. A specification and its referenced documents may mix `.json`, `.yaml`, and `.yml`. Duckie follows contained local references and same-origin remote references, supports common parameter serialization styles, and creates file inputs for binary and multipart bodies.
+
+YAML imports accept one bounded, JSON-compatible document. Duplicate mapping keys, unsupported custom tags, non-string mapping keys, excessive aliases/nesting, and normalized documents over 20 MiB are rejected rather than interpreted ambiguously. YAML comments are not retained because import normalizes the document into the same JSON value tree used by the existing review pipeline.
 
 Use **File → Update from spec…** to compare an imported collection with its source. Duckie shows changed, new, and removed operations before applying your choices, preserves existing request IDs and tests, and waits for you to save the collection.
 

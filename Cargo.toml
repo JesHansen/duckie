@@ -18,6 +18,7 @@ duckie-tests = { path = "crates/duckie-tests" }
 duckie-app = { path = "crates/duckie-app" }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+serde-saphyr = { version = "1.2", default-features = false, features = ["deserialize"] }
 anyhow = "1.0"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "net", "signal"] }
