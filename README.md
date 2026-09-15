@@ -121,6 +121,8 @@ The response **Compare** tab compares the current result with another retained r
 
 Response **Request details** shows the negotiated HTTP version, total duration, time until response headers arrived, and the combined body-transfer/decoding interval. Lower-level DNS, TCP, TLS, proxy, upload, server-wait, connection-reuse, and separate transfer/decoding measurements are labelled unavailable because the current transport cannot observe them reliably.
 
+Use **Request → Session history…** to review direct sends from the current application session. Each entry keeps its captured editable input, masked effective request, environment, result, duration, test outcome, and response while available. History is limited to 100 entries and 20 MiB of response bodies; older bodies are visibly evicted before metadata. **Open as new draft** creates an unsaved editable copy without sending it. Values supplied through secret bindings are not copied into history and resolve from the currently selected environment on a later send; literal values authored directly in a request remain part of its captured input.
+
 ## Headless execution
 
 Build the workspace, then run one saved request by ID or exact name:

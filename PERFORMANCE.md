@@ -91,6 +91,12 @@ The first attempt at this comparison showed almost no difference (~3 MiB), which
 
 Two caveats: 20% of requests carrying an extra file is this fixture's shape, not a general ratio, and process-level peak/current-after-settle readings carry more run-to-run noise than the p95 figures above, which average many trials. Restore *time* is essentially unaffected — the same files are still read and hashed at open either way — matching the existing caution that this work targets memory, not the restore-time budget.
 
+### Bounded session history, 15 September 2026
+
+The session-history implementation shares each response's existing `BodyHandle` rather than copying its body, retains at most 20 MiB of history bodies, and keeps at most 100 metadata entries. The regression suite directly verifies both limits and that the oldest body is evicted while its metadata remains.
+
+A single release/bench trial exercised the existing 50 MiB response path after history capture was added. It measured 108,273,664 settled private bytes, 134,541,312 peak private bytes, and a **25.05 MiB** delta, remaining inside the 32 MiB response delta target and the 500 MB product ceiling. Raw output is in [`artifacts/history-retention-2026-09-15.json`](artifacts/history-retention-2026-09-15.json). This was one focused comparison, not the full multi-trial p95 protocol, and does not measure a history filled to its 20 MiB aggregate cap.
+
 ### What the frame number does and does not include
 
 Frame construction is CPU time to produce a frame, measured headlessly with a keystroke on every other frame, a 1,000-request sidebar, and a syntax-coloured response with an active find. The size is the worst case that still colours, just under the 64 KiB cap; a 1 MiB page draws plain and costs 3.6 ms. Colouring is what makes the difference — the same megabyte cost 73 ms per frame when coloured, which is why the cap exists: 25 KiB measured 3.7 ms, 50 KiB 7.2 ms, 100 KiB 12.9 ms and 200 KiB 28.6 ms. It excludes texture upload, present and the compositor, so the reported p95 7.0 ms is a lower bound on input-to-paint, not proof that the full 16 ms target passes. The notes also report a 20.9 ms maximum attributed to first-frame font-atlas construction.

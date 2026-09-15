@@ -307,6 +307,9 @@ impl Duckie {
         if self.suite.open {
             self.suite_dialog(ctx);
         }
+        if self.history_open {
+            self.history_dialog(ctx);
+        }
         if self.request_preview.is_some() {
             let mut open = true;
             egui::Window::new("Prepared request preview")
@@ -454,6 +457,189 @@ impl Duckie {
             token.cancel();
         }
         self.suite.open = open;
+    }
+    fn history_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = self.history_open;
+        let mut replay = None;
+        let mut clear = false;
+        egui::Window::new("Session history")
+            .open(&mut open)
+            .default_width(820.0)
+            .default_height(520.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.weak(format!(
+                        "{} runs · up to {} entries and {} MiB of response bodies",
+                        self.history.len(),
+                        MAX_HISTORY_ENTRIES,
+                        HISTORY_BODY_BUDGET / MIB
+                    ));
+                    if ui
+                        .add_enabled(!self.history.is_empty(), egui::Button::new("Clear history"))
+                        .clicked()
+                    {
+                        clear = true;
+                    }
+                });
+                ui.weak("History is session-only. Eviction removes response bodies first; request and result metadata remain available.");
+                ui.separator();
+                ui.columns(2, |columns| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("history-list")
+                        .show(&mut columns[0], |ui| {
+                            for (index, entry) in self.history.iter().enumerate().rev() {
+                                let age = entry
+                                    .captured_at
+                                    .elapsed()
+                                    .map(|elapsed| format!("{}s ago", elapsed.as_secs()))
+                                    .unwrap_or_else(|_| "just now".into());
+                                let state = if entry.result.outcome != Outcome::Complete {
+                                    "ERROR"
+                                } else if entry.report.as_ref().is_some_and(|report| {
+                                    report.suite_error.is_some()
+                                        || report.tests.iter().any(|test| !test.passed)
+                                }) {
+                                    "FAIL"
+                                } else {
+                                    "PASS"
+                                };
+                                let label = format!(
+                                    "{state} · {} · {}\n{} · {} ms",
+                                    entry.request.name,
+                                    entry.result.summary.environment,
+                                    age,
+                                    entry.result.duration_ms
+                                );
+                                if ui
+                                    .selectable_label(self.history_selected == Some(index), label)
+                                    .clicked()
+                                {
+                                    self.history_selected = Some(index);
+                                }
+                            }
+                        });
+                    columns[1].separator();
+                    let Some(index) = self.history_selected else {
+                        columns[1].weak("Send a request to create the first history entry.");
+                        return;
+                    };
+                    let Some(entry) = self.history.get(index) else {
+                        return;
+                    };
+                    let ui = &mut columns[1];
+                    ui.heading(&entry.request.name);
+                    ui.monospace(format!("{} {}", entry.request.method, entry.request.address()));
+                    ui.label(format!(
+                        "Environment: {} · Draft revision: {}",
+                        entry.result.summary.environment, entry.result.summary.revision
+                    ));
+                    ui.label(format!(
+                        "Result: {}{} · {} ms",
+                        entry.result.outcome,
+                        entry
+                            .result
+                            .status
+                            .map(|status| format!(" · HTTP {status}"))
+                            .unwrap_or_default(),
+                        entry.result.duration_ms
+                    ));
+                    if let Some(report) = &entry.report {
+                        let passed = report.tests.iter().filter(|test| test.passed).count();
+                        ui.label(format!(
+                            "Tests: {passed} passed, {} failed · test revision {}",
+                            report.tests.len() - passed,
+                            entry.test_revision
+                        ));
+                    } else {
+                        ui.weak("No test result captured");
+                    }
+                    if ui.button("Open as new draft").clicked() {
+                        replay = Some(index);
+                    }
+                    ui.separator();
+                    ui.strong("Captured editable input");
+                    let mut definition =
+                        serde_json::to_string_pretty(&entry.request).unwrap_or_default();
+                    if definition.len() > 4096 {
+                        let mut boundary = 4096;
+                        while !definition.is_char_boundary(boundary) {
+                            boundary -= 1;
+                        }
+                        definition.truncate(boundary);
+                        definition.push_str("\n… input preview limited to 4 KiB");
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(definition).monospace())
+                                    .selectable(true),
+                            );
+                        });
+                    ui.separator();
+                    ui.strong("Captured effective request");
+                    ui.monospace(format!(
+                        "{} {}",
+                        entry.result.summary.method, entry.result.summary.url
+                    ));
+                    for (name, value) in &entry.result.summary.headers {
+                        ui.monospace(format!("{name}: {value}"));
+                    }
+                    ui.separator();
+                    ui.strong("Captured response");
+                    if entry.body_evicted {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "Response body evicted from bounded history",
+                        );
+                    } else {
+                        ui.label(format!("{} decoded bytes", entry.result.body.len()));
+                        let bytes = entry.result.body.read(0, 4096).unwrap_or_default();
+                        let mut preview = String::from_utf8_lossy(&bytes).into_owned();
+                        if entry.result.body.len() > bytes.len() as u64 {
+                            preview.push_str("\n… preview limited to 4 KiB");
+                        }
+                        egui::ScrollArea::vertical()
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(preview).monospace())
+                                        .selectable(true),
+                                );
+                            });
+                    }
+                });
+            });
+        if clear {
+            self.history.clear();
+            self.history_selected = None;
+        }
+        if let Some(index) = replay
+            && let Some(entry) = self.history.get(index)
+        {
+            let mut request = entry.request.clone();
+            request.id = new_id();
+            request.name.push_str(" replay");
+            request.tests.file.clear();
+            let variable_rows = request
+                .variables
+                .iter()
+                .map(|(name, value)| Row::new(name, value))
+                .collect();
+            self.drafts.push(Draft {
+                request,
+                variable_rows,
+                source: entry.source.clone(),
+                dirty: true,
+                ..Default::default()
+            });
+            self.selected = self.drafts.len() - 1;
+            self.request_tab = RequestTab::Params;
+            self.focus_url = true;
+            self.status = "Opened history snapshot as a new unsaved draft".into();
+            open = false;
+        }
+        self.history_open = open;
     }
     /// Reports files another program changed under the collection, and offers the only two
     /// honest choices: take what is on disk, or keep the in-memory version and deal with it at

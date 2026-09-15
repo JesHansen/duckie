@@ -1,0 +1,51 @@
+{
+  "CapturedUtc": "2026-09-15T16:20:53.0406346Z",
+  "Machine": {
+    "OS": "Microsoft Windows 11 Pro 10.0.26200.0",
+    "CPU": "AMD Ryzen 7 5800X 8-Core Processor             ",
+    "Cores": 16,
+    "RAMBytes": 34279378944,
+    "GPU": "NVIDIA GeForce GTX 1080 Ti",
+    "PowerPlan": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+    "Renderer": "glow"
+  },
+  "Launch": {
+    "Measurement": "Warm launch to first frame",
+    "Trials": 1,
+    "MinMs": 224.0,
+    "MedianMs": 224,
+    "P95Ms": 224,
+    "TargetMs": 300
+  },
+  "RestoreFirst": {
+    "Measurement": "Restored collection, first frame",
+    "Trials": 0,
+    "MinMs": null,
+    "MedianMs": null,
+    "P95Ms": null,
+    "TargetMs": 300
+  },
+  "Restore": {
+    "Measurement": "Restored collection searchable",
+    "Trials": 0,
+    "MinMs": null,
+    "MedianMs": null,
+    "P95Ms": null,
+    "TargetMs": 500
+  },
+  "LargeResponse": {
+    "FirstFrameMs": 159,
+    "SearchableMs": null,
+    "RespondedMs": 306,
+    "Requests": 1,
+    "SettledBytes": 108273664,
+    "PeakBytes": 134541312,
+    "PeakWsBytes": 99074048
+  },
+  "Notes": [
+    "First-frame milestones are recorded inside the app at the end of its first frame; they exclude compositor present time, so treat them as a lower bound.",
+    "Cold launch (20 trials) is NOT measured here: it needs controlled cache eviction between trials.",
+    "Input-to-paint latency and GPU allocations are NOT measured here.",
+    "Peak private bytes come from the kernel's PeakPagefileUsage for the GUI process only; test workers are separate processes and are not included."
+  ]
+}

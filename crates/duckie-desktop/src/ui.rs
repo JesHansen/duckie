@@ -542,6 +542,13 @@ impl Duckie {
                     self.suite.open = true;
                     ui.close();
                 }
+                if ui.button("Session history…").clicked() {
+                    self.history_open = true;
+                    if self.history_selected.is_none() && !self.history.is_empty() {
+                        self.history_selected = Some(self.history.len() - 1);
+                    }
+                    ui.close();
+                }
                 if ui.button("Duplicate request").clicked() {
                     let d = &self.drafts[self.selected];
                     let mut r = d.request.clone();

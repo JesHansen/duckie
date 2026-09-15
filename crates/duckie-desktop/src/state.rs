@@ -4,9 +4,9 @@ use duckie_model::*;
 use duckie_storage::{Collection, SecretsFile, StoredRequest};
 use eframe::egui;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -14,6 +14,29 @@ use tokio_util::sync::CancellationToken;
 /// Whole-body matches retained. Far above what anyone navigates by hand, and enough that the
 /// count stays honest for a realistic search.
 pub const MAX_BODY_HITS: usize = 50_000;
+pub const MAX_HISTORY_ENTRIES: usize = 100;
+pub const HISTORY_BODY_BUDGET: u64 = 20 * MIB;
+fn trim_history(history: &mut VecDeque<HistoryEntry>) {
+    while history.len() > MAX_HISTORY_ENTRIES {
+        history.pop_front();
+    }
+    let mut retained: u64 = history
+        .iter()
+        .filter(|entry| !entry.body_evicted)
+        .map(|entry| entry.result.body.len())
+        .sum();
+    while retained > HISTORY_BODY_BUDGET {
+        let Some(entry) = history
+            .iter_mut()
+            .find(|entry| !entry.body_evicted && !entry.result.body.is_empty())
+        else {
+            break;
+        };
+        retained = retained.saturating_sub(entry.result.body.len());
+        entry.result.body = BodyHandle::default();
+        entry.body_evicted = true;
+    }
+}
 /// Bytes of a response body to show at once.
 ///
 /// Laying text out costs roughly 200 bytes of glyph and mesh data per character regardless of
@@ -222,6 +245,15 @@ pub struct ResponseView {
     pub environment: Values,
     pub viewed: u64,
 }
+pub struct HistoryEntry {
+    pub captured_at: SystemTime,
+    pub request: RequestDefinition,
+    pub source: String,
+    pub result: ExecutionResult,
+    pub report: Option<TestReport>,
+    pub test_revision: u64,
+    pub body_evicted: bool,
+}
 pub struct PreviewContent {
     pub text: String,
     pub pretty: Option<String>,
@@ -325,6 +357,11 @@ pub struct Duckie {
     pub drafts: Vec<Draft>,
     pub selected: usize,
     pub responses: BTreeMap<String, ResponseView>,
+    pub history: VecDeque<HistoryEntry>,
+    pub history_open: bool,
+    pub history_selected: Option<usize>,
+    /// Exact editable input captured at Send, waiting for the response event that owns it.
+    pub pending_history_input: Option<(RequestDefinition, String)>,
     pub clock: u64,
     pub envs: Vec<Environment>,
     pub env_index: usize,
@@ -410,6 +447,10 @@ impl Duckie {
             drafts: vec![Draft::default()],
             selected: 0,
             responses: BTreeMap::new(),
+            history: VecDeque::new(),
+            history_open: false,
+            history_selected: None,
+            pending_history_input: None,
             clock: 0,
             envs: vec![Environment::default()],
             env_index: 0,
@@ -744,6 +785,7 @@ impl Duckie {
         }
         let env = self.snapshot();
         let d = &self.drafts[self.selected];
+        let history_input = (d.request.clone(), d.source.clone());
         let result = prepare(&d.request, &env, &RunBindings::default(), d.revision).and_then(|p| {
             self.service.send(
                 p,
@@ -754,6 +796,7 @@ impl Duckie {
         });
         match result {
             Ok((token, progress)) => {
+                self.pending_history_input = Some(history_input);
                 self.active = Some((d.request.id.clone(), token, Instant::now(), progress));
                 self.active_environment = env.values;
                 self.active_testing = false;
@@ -911,6 +954,19 @@ impl Duckie {
             match event {
                 RunEvent::Response(result) => {
                     let id = result.request_id.clone();
+                    if let Some((request, source)) = self.pending_history_input.take() {
+                        self.history.push_back(HistoryEntry {
+                            captured_at: SystemTime::now(),
+                            request,
+                            source,
+                            test_revision: result.summary.revision,
+                            result: result.clone(),
+                            report: None,
+                            body_evicted: false,
+                        });
+                        trim_history(&mut self.history);
+                        self.history_selected = Some(self.history.len().saturating_sub(1));
+                    }
                     self.preview(
                         id.clone(),
                         result.run_id.clone(),
@@ -971,6 +1027,15 @@ impl Duckie {
                     revision,
                     report,
                 } => {
+                    if let Some(entry) = self
+                        .history
+                        .iter_mut()
+                        .rev()
+                        .find(|entry| entry.result.run_id == run_id)
+                    {
+                        entry.report = Some(report.clone());
+                        entry.test_revision = revision;
+                    }
                     if let Some(view) = self.responses.get_mut(&request_id)
                         && view.result.run_id == run_id
                     {
@@ -986,6 +1051,7 @@ impl Duckie {
                         d.error = message.clone();
                     }
                     self.status = message;
+                    self.pending_history_input = None;
                 }
                 RunEvent::Finished => {
                     self.active = None;
@@ -1410,5 +1476,63 @@ mod preview_tests {
         let ending = b"duck\xC3";
         let shown_len = complete_utf8_len(ending, ending.len());
         assert_eq!(std::str::from_utf8(&ending[..shown_len]).unwrap(), "duck");
+    }
+
+    fn history_entry(name: &str, bytes: usize) -> HistoryEntry {
+        let request = RequestDefinition {
+            name: name.into(),
+            ..Default::default()
+        };
+        HistoryEntry {
+            captured_at: SystemTime::now(),
+            source: String::new(),
+            result: ExecutionResult {
+                request_id: request.id.clone(),
+                run_id: name.into(),
+                summary: RequestSummary {
+                    method: "GET".into(),
+                    url: "http://localhost/".into(),
+                    headers: vec![],
+                    environment: "dev".into(),
+                    revision: 0,
+                    timeout_ms: 1_000,
+                },
+                outcome: Outcome::Complete,
+                status: Some(200),
+                status_text: "OK".into(),
+                headers: vec![],
+                body_error: None,
+                body: BodyHandle::Memory(std::sync::Arc::new(vec![0; bytes])),
+                encoded_bytes: bytes as u64,
+                duration_ms: 1,
+                diagnostics: ResponseDiagnostics::default(),
+            },
+            request,
+            report: None,
+            test_revision: 0,
+            body_evicted: false,
+        }
+    }
+
+    #[test]
+    fn history_keeps_metadata_while_evicting_oldest_bodies_within_its_budget() {
+        let mut history = VecDeque::from([
+            history_entry("old", 11 * MIB as usize),
+            history_entry("new", 11 * MIB as usize),
+        ]);
+        trim_history(&mut history);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].request.name, "old");
+        assert!(history[0].body_evicted);
+        assert!(history[0].result.body.is_empty());
+        assert!(!history[1].body_evicted);
+        assert_eq!(history[1].result.body.len(), 11 * MIB);
+
+        for index in 0..MAX_HISTORY_ENTRIES {
+            history.push_back(history_entry(&format!("run {index}"), 0));
+        }
+        trim_history(&mut history);
+        assert_eq!(history.len(), MAX_HISTORY_ENTRIES);
+        assert_eq!(history.front().unwrap().request.name, "run 0");
     }
 }

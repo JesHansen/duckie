@@ -49,6 +49,8 @@ All proposals preserve the local-only product contract: no account, telemetry, c
 
 ### 3. Bounded request history with replayable drafts
 
+**Implemented 15 September 2026.** Direct desktop sends enter a chronological, session-only history containing the exact editable request/test snapshot, masked effective request summary, environment, result, duration, test outcome, and retained response. History keeps at most 100 metadata entries and 20 MiB of response bodies, evicting the oldest bodies first with a visible marker while sharing body handles rather than copying content. Any entry can open as a new unsaved draft; values supplied through secret bindings are not copied into the snapshot and resolve from the currently selected environment when that draft is sent.
+
 **What to add.** A chronological session history with request name, environment, timestamp, result, duration, and test outcome. Selecting a run reveals its captured input and available response. Open as draft recreates an editable request without sending it.
 
 **Why build it.** Debugging often means changing one input repeatedly. The latest response alone cannot explain which earlier combination worked. Duckie currently retains at most three responses and associates desktop responses with request IDs; a deliberate history model would preserve the investigation sequence rather than treating retention as history.
