@@ -24,7 +24,7 @@ try {
     $version = ($metadata.packages | Where-Object { $_.name -eq 'duckie-desktop' }).version
     $destination = Join-Path $root "dist/Duckie-$version-windows-x64"
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
-    foreach ($file in @('duckie.exe', 'duckie-test-worker.exe')) {
+    foreach ($file in @('duckie.exe', 'duckie-cli.exe', 'duckie-test-worker.exe')) {
         Copy-Item -LiteralPath (Join-Path $root "target/release/$file") -Destination $destination -Force
     }
     foreach ($file in @('LICENSE', 'README.md', 'IMPLEMENTATION_STATUS.md', 'PERFORMANCE.md')) {

@@ -45,7 +45,7 @@ cargo build --workspace --release
 .\target\release\duckie.exe
 ```
 
-The app requires OpenGL 3 or newer. Keep `duckie-test-worker.exe` beside `duckie.exe`; building the whole workspace as shown above produces both executables. To create a portable ZIP, run:
+The app requires OpenGL 3 or newer. Keep `duckie-test-worker.exe` beside `duckie.exe` and `duckie-cli.exe`; building the whole workspace as shown above produces all three executables. To create a portable ZIP containing the desktop app, CLI, and test worker, run:
 
 ```powershell
 .\scripts\package.ps1
