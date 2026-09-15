@@ -298,6 +298,7 @@ pub fn compare_baseline(
         body: BodyHandle::Memory(Arc::new(right.body.clone())),
         encoded_bytes: right.body.len() as u64,
         duration_ms: 0,
+        diagnostics: ResponseDiagnostics::default(),
     };
     compare(left, &synthetic, ignored)
 }
@@ -605,6 +606,7 @@ mod feature_tests {
             body: BodyHandle::Memory(Arc::new(body.as_bytes().to_vec())),
             encoded_bytes: body.len() as u64,
             duration_ms: 4,
+            diagnostics: ResponseDiagnostics::default(),
         }
     }
     fn report(failed: bool) -> HeadlessReport {

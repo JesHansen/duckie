@@ -119,6 +119,8 @@ Use **Request → Run requests…** to review and sequentially execute the selec
 
 The response **Compare** tab compares the current result with another retained result or an explicitly saved baseline. It reports status, header, bounded text, and structural JSON changes. JSON object order is insignificant, array order remains significant, and comma-separated RFC 6901 pointers can ignore volatile fields. Baseline files contain response data and are limited to 2 MiB.
 
+Response **Request details** shows the negotiated HTTP version, total duration, time until response headers arrived, and the combined body-transfer/decoding interval. Lower-level DNS, TCP, TLS, proxy, upload, server-wait, connection-reuse, and separate transfer/decoding measurements are labelled unavailable because the current transport cannot observe them reliably.
+
 ## Headless execution
 
 Build the workspace, then run one saved request by ID or exact name:

@@ -105,6 +105,7 @@ impl HttpEngine {
             body: BodyHandle::default(),
             encoded_bytes: 0,
             duration_ms: 0,
+            diagnostics: ResponseDiagnostics::default(),
         };
         let build = async {
             let mut builder = client.request(method, &request.url).headers(headers);
@@ -169,6 +170,19 @@ impl HttpEngine {
             None
         };
         if let Some(response) = response {
+            result.diagnostics.headers_ms = Some(started.elapsed().as_millis() as u64);
+            result.diagnostics.http_version = Some(
+                match response.version() {
+                    reqwest::Version::HTTP_09 => "HTTP/0.9",
+                    reqwest::Version::HTTP_10 => "HTTP/1.0",
+                    reqwest::Version::HTTP_11 => "HTTP/1.1",
+                    reqwest::Version::HTTP_2 => "HTTP/2",
+                    reqwest::Version::HTTP_3 => "HTTP/3",
+                    _ => "Unknown HTTP version",
+                }
+                .into(),
+            );
+            let body_started = Instant::now();
             result.status = Some(response.status().as_u16());
             result.status_text = response.status().canonical_reason().unwrap_or("").into();
             result.headers = response
@@ -243,6 +257,7 @@ impl HttpEngine {
             }
             result.encoded_bytes = progress.encoded();
             result.body = capture.finish().await?;
+            result.diagnostics.body_and_decode_ms = Some(body_started.elapsed().as_millis() as u64);
         }
         result.duration_ms = started.elapsed().as_millis() as u64;
         Ok(result)
@@ -653,6 +668,9 @@ mod tests {
         assert_eq!(r.status, Some(500));
         assert_eq!(r.outcome, Outcome::Complete);
         assert_eq!(r.headers.iter().filter(|(n, _)| n == "x-value").count(), 2);
+        assert_eq!(r.diagnostics.http_version.as_deref(), Some("HTTP/1.1"));
+        assert!(r.diagnostics.headers_ms.is_some());
+        assert!(r.diagnostics.body_and_decode_ms.is_some());
     }
     #[tokio::test]
     async fn redirects_are_never_followed() {

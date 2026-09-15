@@ -60,6 +60,7 @@ fn cold_test_worker_overhead() {
         body: BodyHandle::Memory(Arc::new(vec![b'x'; 1024])),
         encoded_bytes: 1024,
         duration_ms: 1,
+        diagnostics: ResponseDiagnostics::default(),
     };
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut samples = vec![];

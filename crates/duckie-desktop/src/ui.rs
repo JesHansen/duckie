@@ -1829,6 +1829,26 @@ impl Duckie {
                         view.result.encoded_bytes,
                         view.result.body.len()
                     ));
+                    ui.separator();
+                    ui.strong("Connection and timing diagnostics");
+                    ui.label(format!(
+                        "HTTP version: {}",
+                        view.result
+                            .diagnostics
+                            .http_version
+                            .as_deref()
+                            .unwrap_or("Unavailable")
+                    ));
+                    ui.label(format!("Total: {} ms", view.result.duration_ms));
+                    ui.label(match view.result.diagnostics.headers_ms {
+                        Some(ms) => format!("Request start to response headers: {ms} ms"),
+                        None => "Request start to response headers: unavailable".into(),
+                    });
+                    ui.label(match view.result.diagnostics.body_and_decode_ms {
+                        Some(ms) => format!("Body transfer and decoding: {ms} ms"),
+                        None => "Body transfer and decoding: unavailable".into(),
+                    });
+                    ui.weak("DNS, TCP, TLS, proxy, request upload, server wait, transfer, decoding, and spool writes overlap or are not exposed separately by the transport. Connection reuse is unavailable.");
                     for (n, v) in &view.result.summary.headers {
                         ui.monospace(format!("{n}: {v}"));
                     }
@@ -2616,6 +2636,7 @@ mod tests {
                     body: BodyHandle::Memory(std::sync::Arc::new(body.clone().into_bytes())),
                     encoded_bytes: body.len() as u64,
                     duration_ms: 1,
+                    diagnostics: ResponseDiagnostics::default(),
                 },
                 preview: body,
                 pretty: None,
@@ -2775,6 +2796,7 @@ mod tests {
                     )),
                     encoded_bytes: 20,
                     duration_ms: 4,
+                    diagnostics: ResponseDiagnostics::default(),
                 },
                 preview: "{\"duck\":1,\n\"duck2\":2}".into(),
                 pretty: None,

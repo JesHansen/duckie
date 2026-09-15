@@ -948,6 +948,18 @@ impl std::fmt::Display for Outcome {
         )
     }
 }
+#[derive(Clone, Default)]
+pub struct ResponseDiagnostics {
+    /// Request start through receipt of response headers. This includes any DNS, connection,
+    /// TLS, request upload, proxy, and server wait work that occurred; those phases are not
+    /// separately observable through the current transport.
+    pub headers_ms: Option<u64>,
+    /// Receipt of response headers through completion of the retained body. Network transfer,
+    /// content decoding, and spool writes overlap and cannot be split reliably.
+    pub body_and_decode_ms: Option<u64>,
+    /// HTTP protocol version reported by the transport for the response.
+    pub http_version: Option<String>,
+}
 #[derive(Clone)]
 pub struct ExecutionResult {
     pub request_id: String,
@@ -963,6 +975,7 @@ pub struct ExecutionResult {
     pub body: BodyHandle,
     pub encoded_bytes: u64,
     pub duration_ms: u64,
+    pub diagnostics: ResponseDiagnostics,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
