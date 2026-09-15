@@ -4,7 +4,7 @@ use duckie_model::*;
 use duckie_openapi::{
     MAX_EXTERNAL_BYTES, MAX_EXTERNAL_DOCUMENTS, external_examples, external_references,
 };
-use duckie_storage::{Collection, SecretsFile, StoredRequest};
+use duckie_storage::SecretsFile;
 use eframe::egui;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -937,7 +937,7 @@ impl Duckie {
                     .filter(|op| op.selected && op.has_diagnostics())
                     .count();
                 ui.label(format!("{count} operations selected · {needs} have diagnostics"));
-                ui.horizontal(|ui|{back=ui.button("Back").clicked();commit=ui.add_enabled(count>0 && !self.io_busy,egui::Button::new(format!("Import {count} requests into a new folder…"))).clicked();});
+                ui.horizontal(|ui|{back=ui.button("Back").clicked();commit=ui.add_enabled(count>0 && !self.io_busy,egui::Button::new(format!("Import {count} requests"))).clicked();});
             }}
             if self.io_busy{ui.label("Reading and parsing…");if let Some(token)=&import.cancel&& ui.button("Cancel read").clicked(){token.cancel();}}
             if !import.error.is_empty(){ui.colored_label(ui.visuals().error_fg_color,&import.error);}
@@ -1066,29 +1066,51 @@ impl Duckie {
                 });
             }
         }
-        if commit
-            && let Some(path) = rfd::FileDialog::new()
-                .set_title("Choose an empty folder for the imported collection")
-                .pick_folder()
-        {
+        // Importing does not touch disk: the app already runs perfectly well with no collection
+        // at all (the blank scratch screen at startup), so a fresh import just becomes that same
+        // in-memory working set. The user only picks a folder if and when they choose to Save —
+        // the common case of "import, call a few endpoints, throw it away" never needs one.
+        if commit {
             let draft = import.draft.as_ref().unwrap();
-            match Collection::new(path, draft.name.clone()) {
-                Ok(mut collection) => {
-                    collection.requests = draft
-                        .operations
-                        .iter()
-                        .filter(|op| op.selected)
-                        .map(|op| StoredRequest::new(op.finish(), String::new()))
-                        .collect();
-                    collection.environments[0]
-                        .values
-                        .insert("baseUrl".into(), import.server.clone());
-                    self.io_busy = true;
-                    self.background(move || IoEvent::Opened(collection.save().map(|_| collection)));
-                    open = false;
-                }
-                Err(e) => import.error = e.to_string(),
+            self.drafts = draft
+                .operations
+                .iter()
+                .filter(|op| op.selected)
+                .map(|op| {
+                    let request = op.finish();
+                    Draft {
+                        variable_rows: request
+                            .variables
+                            .iter()
+                            .map(|(name, value)| Row::new(name, value))
+                            .collect(),
+                        request,
+                        source: String::new(),
+                        revision: 0,
+                        dirty: true,
+                        error: String::new(),
+                        pending: false,
+                    }
+                })
+                .collect();
+            if self.drafts.is_empty() {
+                self.drafts.push(Draft::default());
             }
+            self.selected = 0;
+            self.envs = vec![Environment::default()];
+            self.envs[0]
+                .values
+                .insert("baseUrl".into(), import.server.clone());
+            self.env_index = 0;
+            self.secrets.clear();
+            self.remember.clear();
+            self.responses.clear();
+            self.env_dirty = true;
+            self.collection = None;
+            self.prefs.last_collection = None;
+            self.status = format!("Imported {} — not saved yet.", draft.name);
+            self.focus_url = true;
+            open = false;
         }
         if apply
             && let Some(plan) = import.plan.as_ref()
@@ -1191,6 +1213,7 @@ impl Duckie {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use duckie_storage::StoredRequest;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
