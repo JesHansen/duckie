@@ -98,6 +98,8 @@ fn json_rows<'a>(
 pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
     let mut changed = false;
     let mut remove = None;
+    let mut append = false;
+    let last = rows.len().saturating_sub(1);
     let available = ui.available_width();
     let (name_width, value_width) = row_widths(available);
     egui::ScrollArea::horizontal()
@@ -118,21 +120,35 @@ pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
                             .on_hover_text("Include this row")
                             .changed();
                         let name_id = egui::Id::new((id, i, "name"));
-                        let edit = ui
-                            .add_sized(
-                                [name_width, ui.spacing().interact_size.y],
-                                egui::TextEdit::singleline(&mut row.name)
-                                    .id(name_id)
-                                    .hint_text("Name"),
-                            )
-                            .changed()
-                            | ui.add_sized(
-                                [value_width, ui.spacing().interact_size.y],
-                                egui::TextEdit::singleline(&mut row.value)
-                                    .id(egui::Id::new((id, i, "value")))
-                                    .hint_text("Value"),
-                            )
-                            .changed();
+                        let value_id = egui::Id::new((id, i, "value"));
+                        let focused = ui.memory(|m| m.focused());
+                        let enter = ui.input_mut(|input| {
+                            (focused == Some(name_id) || focused == Some(value_id))
+                                && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                        });
+                        let name_focused = ui.memory(|m| m.has_focus(name_id));
+                        let name = ui.add_sized(
+                            [name_width, ui.spacing().interact_size.y],
+                            egui::TextEdit::singleline(&mut row.name)
+                                .id(name_id)
+                                .hint_text("Name"),
+                        );
+                        let value = ui.add_sized(
+                            [value_width, ui.spacing().interact_size.y],
+                            egui::TextEdit::singleline(&mut row.value)
+                                .id(value_id)
+                                .hint_text("Value"),
+                        );
+                        if enter {
+                            if name_focused {
+                                ui.memory_mut(|m| m.request_focus(value_id));
+                            } else if i == last
+                                && (!row.name.trim().is_empty() || !row.value.trim().is_empty())
+                            {
+                                append = true;
+                            }
+                        }
+                        let edit = name.changed() | value.changed();
                         if edit {
                             row.raw = None;
                             row.raw_is_literal = false;
@@ -149,7 +165,7 @@ pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
         rows.remove(index);
         changed = true;
     }
-    if ui.button("+ Add row").clicked() {
+    if ui.button("+ Add row").clicked() || (append && remove.is_none()) {
         let new_name = egui::Id::new((id, rows.len(), "name"));
         rows.push(Row::new("", ""));
         ui.memory_mut(|memory| memory.request_focus(new_name));
