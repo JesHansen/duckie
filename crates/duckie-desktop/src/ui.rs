@@ -324,13 +324,14 @@ impl Duckie {
         let mut groups: Vec<(&str, Vec<usize>)> = vec![];
         let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for (i, d) in self.drafts.iter().enumerate() {
-            let matches = search.is_empty()
-                || format!(
-                    "{} {} {} {}",
-                    d.request.name, d.request.method, d.request.url, d.request.folder
-                )
-                .to_lowercase()
-                .contains(&search);
+            let searchable = format!(
+                "{} {} {} {}",
+                d.request.name, d.request.method, d.request.url, d.request.folder
+            )
+            .to_lowercase();
+            let matches = search
+                .split_whitespace()
+                .all(|word| searchable.contains(word));
             if !matches {
                 continue;
             }
