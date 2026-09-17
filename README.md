@@ -70,6 +70,7 @@ Useful shortcuts:
 | **Ctrl+Enter** | Send the current request |
 | **Ctrl+Shift+Enter** | Run tests against the retained response |
 | **Ctrl+S** | Save the whole collection |
+| **Ctrl+Shift+O** | Import an OpenAPI specification |
 | **Ctrl+T** | Paste the clipboard into the bearer token field |
 | **Ctrl+F** | Find in the focused editor or response body |
 

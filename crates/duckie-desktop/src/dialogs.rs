@@ -360,7 +360,25 @@ impl Duckie {
             self.import_dialog(ctx);
         }
         if let Some(action) = self.pending {
-            let mut choice = 0;
+            use egui::{Key, KeyboardShortcut, Modifiers};
+            let pressed = |modifiers, key| {
+                ctx.input_mut(|input| {
+                    input.consume_shortcut(&KeyboardShortcut::new(modifiers, key))
+                })
+            };
+            let mut choice =
+                if pressed(Modifiers::NONE, Key::Escape) || pressed(Modifiers::ALT, Key::C) {
+                    3
+                } else if pressed(Modifiers::ALT, Key::D) {
+                    2
+                } else if pressed(Modifiers::NONE, Key::Enter)
+                    || pressed(Modifiers::ALT, Key::S)
+                    || pressed(Modifiers::CTRL, Key::S)
+                {
+                    1
+                } else {
+                    0
+                };
             egui::Window::new("Unsaved changes")
                 .collapsible(false)
                 .resizable(false)
@@ -368,13 +386,13 @@ impl Duckie {
                 .show(ctx, |ui| {
                     ui.label("Save your collection and current drafts before continuing?");
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if ui.button("Save (Enter / Alt+S)").clicked() {
                             choice = 1;
                         }
-                        if ui.button("Discard").clicked() {
+                        if ui.button("Discard (Alt+D)").clicked() {
                             choice = 2;
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel (Esc / Alt+C)").clicked() {
                             choice = 3;
                         }
                     });
@@ -808,15 +826,29 @@ impl Duckie {
         };
         egui::Window::new(title).open(&mut open).default_size([880.0,570.0]).show(ctx,|ui|{
             match import.draft.as_mut() { None => {
-                ui.horizontal(|ui|{ui.selectable_value(&mut import.url_mode,false,"Local file");ui.selectable_value(&mut import.url_mode,true,"URL");});ui.separator();
+                let mut focus_read = false;
+                ui.horizontal(|ui|{ui.selectable_value(&mut import.url_mode,true,"URL");ui.selectable_value(&mut import.url_mode,false,"Local file");});ui.separator();
                 ui.label("Swagger 2.0 / OpenAPI 3.0 / 3.1 / 3.2 · JSON or YAML");
-                ui.horizontal(|ui|{ui.add(egui::TextEdit::singleline(&mut import.source).desired_width(650.0).hint_text(if import.url_mode{"https://api.example.com/openapi.yaml"}else{"Choose an OpenAPI JSON or YAML file"}));if !import.url_mode && ui.button("Browse…").clicked()&& let Some(path)=rfd::FileDialog::new().add_filter("OpenAPI",&["json","yaml","yml"]).pick_file(){import.source=path.to_string_lossy().into_owned();}});
+                ui.horizontal(|ui| {
+                    let field = ui.add(egui::TextEdit::singleline(&mut import.source).desired_width(650.0).hint_text(if import.url_mode { "https://api.example.com/openapi.yaml" } else { "Choose an OpenAPI JSON or YAML file" }));
+                    focus_read = import.url_mode && field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if import.focus_source {
+                        if import.url_mode { field.request_focus(); }
+                        import.focus_source = false;
+                    }
+                    if !import.url_mode && ui.button("Browse…").clicked() && let Some(path) = rfd::FileDialog::new().add_filter("OpenAPI", &["json", "yaml", "yml"]).pick_file() {
+                        import.source = path.to_string_lossy().into_owned();
+                    }
+                });
                 if import.url_mode{ui.collapsing("Authentication for this import only",|ui|{
                     ui.label("Bearer token");ui.add(egui::TextEdit::singleline(&mut import.bearer).password(true).desired_width(500.0));
                     ui.horizontal(|ui|{ui.label("API key header");ui.text_edit_singleline(&mut import.api_header);ui.label("Value");ui.add(egui::TextEdit::singleline(&mut import.api_value).password(true));});ui.weak("Import credentials are never copied to generated requests.");
                 });}
                 ui.add_space(16.0);ui.weak("Read creates a review draft. Generated API requests are never sent during import.");
-                read=ui.add_enabled(!self.io_busy && !import.source.trim().is_empty(),egui::Button::new("Read and review")).clicked();
+                let can_read = !self.io_busy && !import.source.trim().is_empty();
+                let read_button = ui.add_enabled(can_read, egui::Button::new("Read and review"));
+                read = read_button.clicked();
+                if focus_read && can_read { read_button.request_focus(); }
             }, Some(draft) if import.update => {
                 ui.label(format!("Comparing against the open collection · OpenAPI {}", draft.version));
                 if let Some(plan) = &import.plan {
@@ -937,7 +969,16 @@ impl Duckie {
                     .filter(|op| op.selected && op.has_diagnostics())
                     .count();
                 ui.label(format!("{count} operations selected · {needs} have diagnostics"));
-                ui.horizontal(|ui|{back=ui.button("Back").clicked();commit=ui.add_enabled(count>0 && !self.io_busy,egui::Button::new(format!("Import {count} requests"))).clicked();});
+                ui.horizontal(|ui| {
+                    back = ui.button("Back").clicked();
+                    let can_commit = count > 0 && !self.io_busy;
+                    let import_button = ui.add_enabled(can_commit, egui::Button::new(format!("Import {count} requests")));
+                    commit = import_button.clicked();
+                    if import.focus_commit {
+                        if can_commit { import_button.request_focus(); }
+                        import.focus_commit = false;
+                    }
+                });
             }}
             if self.io_busy{ui.label("Reading and parsing…");if let Some(token)=&import.cancel&& ui.button("Cancel read").clicked(){token.cancel();}}
             if !import.error.is_empty(){ui.colored_label(ui.visuals().error_fg_color,&import.error);}

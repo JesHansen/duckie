@@ -316,6 +316,8 @@ pub enum Pending {
 #[derive(Default)]
 pub struct ImportUi {
     pub url_mode: bool,
+    pub focus_source: bool,
+    pub focus_commit: bool,
     pub source: String,
     pub bearer: String,
     pub api_header: String,
@@ -1114,6 +1116,7 @@ impl Duckie {
                                     import.apply_removals = vec![false; plan.removals.len()];
                                     import.plan = Some(plan);
                                 }
+                                import.focus_commit = !import.update;
                                 import.draft = Some(draft);
                                 import.error.clear();
                             }
@@ -1400,7 +1403,13 @@ impl Duckie {
                     }
                 }
             }
-            Pending::Import => self.import = Some(ImportUi::default()),
+            Pending::Import => {
+                self.import = Some(ImportUi {
+                    url_mode: true,
+                    focus_source: true,
+                    ..Default::default()
+                })
+            }
             Pending::UpdateFromSpec => {
                 self.import = Some(ImportUi {
                     update: true,

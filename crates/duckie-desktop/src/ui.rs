@@ -364,6 +364,10 @@ impl Duckie {
         self.env_dirty = true;
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // The unsaved-changes dialog handles its own shortcuts and continuation.
+        if self.pending.is_some() {
+            return;
+        }
         use egui::{Key, KeyboardShortcut as Shortcut, Modifiers};
         let pressed =
             |modifiers, key| ctx.input_mut(|i| i.consume_shortcut(&Shortcut::new(modifiers, key)));
@@ -745,7 +749,7 @@ impl Duckie {
         if ui.button("New collection…").clicked() {
             self.request_action(Pending::NewCollection);
         }
-        if ui.button("Import OpenAPI…").clicked() {
+        if ui.button("Import OpenAPI…    Ctrl+Shift+O").clicked() {
             self.request_action(Pending::Import);
         }
     }
