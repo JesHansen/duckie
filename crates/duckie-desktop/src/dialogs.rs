@@ -899,10 +899,25 @@ impl Duckie {
                 ui.separator();
                 ui.columns(2,|columns|{
                     let left=&mut columns[0];left.add(egui::TextEdit::singleline(&mut import.filter).hint_text("Find operations…").desired_width(f32::INFINITY));
-                    left.horizontal(|ui|{if ui.button("Select all").clicked(){for op in &mut draft.operations{op.selected=true;}}
-                    if ui.button("None").clicked(){for op in &mut draft.operations{op.selected=false;}}});
+                    let filter = import.filter.trim().to_lowercase();
+                    let matching: Vec<usize> = draft.operations.iter().enumerate().filter_map(|(i, op)|
+                        format!("{} {}", op.request.name, op.request.url).to_lowercase().contains(&filter).then_some(i)
+                    ).collect();
+                    left.label(format!("{} matching · {} selected total", matching.len(), draft.operations.iter().filter(|op| op.selected).count()));
+                    if !filter.is_empty() {
+                        left.horizontal(|ui| {
+                            for (label, selected) in [("Select matching", true), ("Deselect matching", false)] {
+                                if ui.button(label).clicked() { for i in &matching { draft.operations[*i].selected = selected; } }
+                            }
+                        });
+                    }
+                    left.horizontal(|ui| {
+                        for (label, selected) in [("Select entire spec", true), ("Deselect entire spec", false)] {
+                            if ui.button(label).clicked() { for op in &mut draft.operations { op.selected = selected; } }
+                        }
+                    });
                     egui::ScrollArea::vertical().id_salt("import-operations").max_height(310.0).show(left,|ui|{
-                        for (i,op) in draft.operations.iter_mut().enumerate(){if !format!("{} {}",op.request.name,op.request.url).to_lowercase().contains(&import.filter.to_lowercase()){continue;}ui.horizontal(|ui|{ui.checkbox(&mut op.selected,"");if ui.selectable_label(import.selected==i,format!("{}  {}",op.request.method,op.request.name)).clicked(){import.selected=i;}});}
+                        for (i,op) in draft.operations.iter_mut().enumerate(){if !matching.contains(&i){continue;}ui.horizontal(|ui|{ui.checkbox(&mut op.selected,"");if ui.selectable_label(import.selected==i,format!("{}  {}",op.request.method,op.request.name)).clicked(){import.selected=i;}});}
                     });
                     let right=&mut columns[1];let op=&mut draft.operations[import.selected];right.strong(format!("{} {}",op.request.method,op.request.url));
                     if !op.bodies.is_empty() {
