@@ -651,25 +651,6 @@ impl Duckie {
         });
     }
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("DUCKIE").strong().size(18.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("+")
-                    .on_hover_text("New request · Ctrl+N")
-                    .clicked()
-                {
-                    self.new_request();
-                }
-            });
-        });
-        ui.add_space(4.0);
-        ui.weak(
-            self.collection
-                .as_ref()
-                .map(|c| c.manifest.name.as_str())
-                .unwrap_or("Scratch workspace"),
-        );
         let search_id = egui::Id::new("request-search");
         let focused = ui.memory(|m| m.has_focus(search_id));
         let mut direction = 0isize;
@@ -689,9 +670,35 @@ impl Duckie {
                 }
             });
         }
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("DUCKIE").strong().size(18.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("+")
+                    .on_hover_text("New request · Ctrl+N")
+                    .clicked()
+                {
+                    self.new_request();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.weak(
+            self.collection
+                .as_ref()
+                .map(|c| c.manifest.name.as_str())
+                .unwrap_or("Scratch workspace"),
+        );
         let search_field = ui.add(
             egui::TextEdit::singleline(&mut self.search)
                 .id(egui::Id::new("request-search"))
+                .event_filter(egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                    ..Default::default()
+                })
                 .hint_text("Find requests…   Ctrl+K")
                 .desired_width(f32::INFINITY),
         );
@@ -716,6 +723,9 @@ impl Duckie {
             self.search_selected = Some(
                 matches[(at as isize + direction).clamp(0, matches.len() as isize - 1) as usize],
             );
+        }
+        if focused && direction != 0 {
+            search_field.request_focus();
         }
         if open && let Some(index) = self.search_selected {
             self.selected = index;
@@ -832,6 +842,9 @@ impl Duckie {
         if ui.button("Import OpenAPI…    Ctrl+Shift+O").clicked() {
             self.request_action(Pending::Import);
         }
+        if focused && direction != 0 {
+            ui.memory_mut(|m| m.request_focus(search_id));
+        }
     }
     fn request_header(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
@@ -858,6 +871,7 @@ impl Duckie {
         ui.add_space(4.0);
         let mut send = false;
         let mut cancel = false;
+        let mut completion = None;
         ui.horizontal(|ui| {
             let d = &mut self.drafts[self.selected];
             egui::ComboBox::from_id_salt("method")
@@ -877,13 +891,109 @@ impl Duckie {
                     changed |= ui.text_edit_singleline(&mut d.request.method).changed();
                 });
             let mut address = d.request.address();
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut address)
-                    .id_salt("url")
-                    .font(egui::TextStyle::Monospace)
-                    .hint_text("Enter a URL, or use {{env.baseUrl}}/path")
-                    .desired_width((ui.available_width() - 110.0).max(100.0)),
-            );
+            let url_id = ui.make_persistent_id("url");
+            let cursor_id = url_id.with("completion-cursor");
+            let dismiss_id = url_id.with("completion-dismissed");
+            let selection_id = url_id.with("completion-selection");
+            let caret = ui
+                .data(|data| data.get_temp::<usize>(cursor_id))
+                .unwrap_or(address.chars().count());
+            let byte = address
+                .char_indices()
+                .nth(caret)
+                .map_or(address.len(), |(i, _)| i);
+            let start = address[..byte]
+                .rfind("{{")
+                .filter(|start| !address[start + 2..byte].contains(['{', '}', ' ', '\n']));
+            let mut inserted_caret = None;
+            let mut names = Vec::new();
+            if let Some(start) = start {
+                let prefix = &address[start + 2..byte];
+                names.extend(
+                    self.envs[self.env_index]
+                        .values
+                        .keys()
+                        .map(|name| format!("env.{name}")),
+                );
+                names.extend(
+                    d.request
+                        .variables
+                        .keys()
+                        .map(|name| format!("request.{name}")),
+                );
+                if let Some(secrets) = self.secrets.get(&self.envs[self.env_index].name) {
+                    names.extend(secrets.keys().map(|name| format!("secret.{name}")));
+                }
+                names.retain(|name| name.starts_with(prefix));
+                names.sort();
+                names.dedup();
+            }
+            let dismissed = ui
+                .data(|data| data.get_temp::<String>(dismiss_id))
+                .as_deref()
+                == Some(&address);
+            let focused = ui.memory(|m| m.has_focus(url_id));
+            let mut selected = ui
+                .data(|data| data.get_temp::<usize>(selection_id))
+                .unwrap_or(0)
+                .min(names.len().saturating_sub(1));
+            if focused && !dismissed && !names.is_empty() {
+                let mut insert = false;
+                let mut dismiss = false;
+                ui.input_mut(|input| {
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        selected = (selected + 1).min(names.len() - 1);
+                    }
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        selected = selected.saturating_sub(1);
+                    }
+                    insert = input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                    dismiss = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                });
+                if dismiss {
+                    ui.data_mut(|data| data.insert_temp(dismiss_id, address.clone()));
+                } else if insert {
+                    let start = start.unwrap();
+                    let end = if address[byte..].starts_with("}}") {
+                        byte + 2
+                    } else {
+                        byte
+                    };
+                    address.replace_range(start..end, &format!("{{{{{}}}}}", names[selected]));
+                    inserted_caret = Some(
+                        address[..start].chars().count() + names[selected].chars().count() + 4,
+                    );
+                    d.request.set_address(&address);
+                    changed = true;
+                    ui.data_mut(|data| data.insert_temp(dismiss_id, address.clone()));
+                    self.focus_url = true;
+                } else {
+                    completion = Some((start.unwrap(), byte, names.clone(), selected));
+                }
+            }
+            ui.data_mut(|data| data.insert_temp(selection_id, selected));
+            let mut output = egui::TextEdit::singleline(&mut address)
+                .id(url_id)
+                .event_filter(egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                    ..Default::default()
+                })
+                .font(egui::TextStyle::Monospace)
+                .hint_text("Enter a URL, or use {{env.baseUrl}}/path")
+                .desired_width((ui.available_width() - 110.0).max(100.0))
+                .show(ui);
+            if let Some(caret) = inserted_caret {
+                let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(caret));
+                output.state.cursor.set_char_range(Some(cursor));
+                output.state.clone().store(ui.ctx(), url_id);
+                output.cursor_range = Some(cursor);
+            }
+            if let Some(cursor) = output.cursor_range {
+                ui.data_mut(|data| data.insert_temp(cursor_id, cursor.primary.index));
+            }
+            let field = output.response.response;
             if field.changed() {
                 d.request.set_address(&address);
                 changed = true;
@@ -924,6 +1034,35 @@ impl Duckie {
                     .clicked();
             }
         });
+        if let Some((start, byte, names, selected)) = completion {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.weak("Variable names · ↑/↓ select · Enter inserts · Escape closes");
+                egui::ScrollArea::vertical()
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        for (i, name) in names.iter().enumerate() {
+                            if ui.selectable_label(i == selected, name).clicked() {
+                                let d = &mut self.drafts[self.selected];
+                                let mut address = d.request.address();
+                                if address.is_char_boundary(start)
+                                    && address.is_char_boundary(byte)
+                                    && byte <= address.len()
+                                {
+                                    let end = if address[byte..].starts_with("}}") {
+                                        byte + 2
+                                    } else {
+                                        byte
+                                    };
+                                    address.replace_range(start..end, &format!("{{{{{name}}}}}"));
+                                    d.request.set_address(&address);
+                                    changed = true;
+                                    self.focus_url = true;
+                                }
+                            }
+                        }
+                    });
+            });
+        }
         if changed {
             self.touch();
         }
@@ -2548,6 +2687,103 @@ mod tests {
             "save must hydrate every draft, not only the selected one"
         );
         assert_eq!(app.drafts[1].source, "test('two', () => {});");
+    }
+    fn key_input(key: egui::Key) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 900.0),
+            )),
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn enter_row_entry_moves_focus_and_only_appends_populated_rows() {
+        let ctx = egui::Context::default();
+        let mut entries = vec![Row::new("Accept", "json")];
+        let name = egui::Id::new(("keyboard-rows", 0usize, "name"));
+        let value = egui::Id::new(("keyboard-rows", 0usize, "value"));
+        ctx.memory_mut(|m| m.request_focus(name));
+        let mut output = ctx.run_ui(key_input(egui::Key::Enter), |ui| {
+            rows(ui, "keyboard-rows", &mut entries);
+        });
+        output.textures_delta.clear();
+        assert!(ctx.memory(|m| m.has_focus(value)));
+        let mut output = ctx.run_ui(key_input(egui::Key::Enter), |ui| {
+            rows(ui, "keyboard-rows", &mut entries);
+        });
+        output.textures_delta.clear();
+        assert_eq!(entries.len(), 2);
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new(("keyboard-rows", 1usize, "value"))));
+        let mut output = ctx.run_ui(key_input(egui::Key::Enter), |ui| {
+            rows(ui, "keyboard-rows", &mut entries);
+        });
+        output.textures_delta.clear();
+        assert_eq!(entries.len(), 2);
+    }
+    #[test]
+    fn search_keyboard_opens_without_sending_and_words_match_independently() {
+        let (ctx, mut app) = app_with(&["users", "orders"]);
+        app.focus_url = false;
+        app.drafts[0].request.method = "POST".into();
+        app.drafts[0].request.url = "https://local.test/users".into();
+        app.search = "USERS post".into();
+        assert!(
+            app.sidebar_rows()
+                .iter()
+                .any(|r| matches!(r, SidebarRow::Request(0)))
+        );
+        app.search.clear();
+        app.selected = 0;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.sidebar(ui),
+        );
+        output.textures_delta.clear();
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("request-search")));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.sidebar(ui));
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(key_input(egui::Key::ArrowDown), |ui| app.sidebar(ui));
+        output.textures_delta.clear();
+        assert_eq!(app.search_selected, Some(1));
+        let mut output = ctx.run_ui(key_input(egui::Key::Enter), |ui| app.sidebar(ui));
+        output.textures_delta.clear();
+        assert_eq!(app.selected, 1);
+        assert!(app.focus_url);
+        assert!(app.active.is_none());
+    }
+    #[test]
+    fn url_completion_inserts_a_name_without_a_secret_value() {
+        let (ctx, mut app) = app_with(&["users"]);
+        app.drafts[0]
+            .request
+            .set_address("https://local.test/{{secret.to");
+        app.secrets
+            .entry(app.envs[app.env_index].name.clone())
+            .or_default()
+            .insert("token".into(), "private-value".into());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.request_header(ui));
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(key_input(egui::Key::Enter), |ui| app.request_header(ui));
+        output.textures_delta.clear();
+        assert_eq!(
+            app.drafts[0].request.address(),
+            "https://local.test/{{secret.token}}"
+        );
+        assert!(app.active.is_none());
     }
     fn app_with(folders: &[&str]) -> (egui::Context, Duckie) {
         let ctx = egui::Context::default();

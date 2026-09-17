@@ -187,3 +187,11 @@ The first attempt at measuring this showed almost no memory difference, which wa
 - **Development dependencies are explicit.** The two end-to-end tests and fixture generator require Node.js on `PATH` and fail rather than silently skipping. The icon script needs PowerShell's unary comma when returning an array; preserve it when editing. Prefer structured patches to shell-generated source that can corrupt escapes.
 - **Development features must not ship.** Screenshot variables (`DUCKIE_CAPTURE_PATH`, `DUCKIE_CAPTURE_THEME`, `DUCKIE_CAPTURE_VIEW`) and `DUCKIE_BENCH_PATH` belong to development builds. Packaging rejects binaries containing the capture/bench markers. Rebuild without those features before packaging.
 - **Fresh workers are intentional.** Each test evaluation starts and stops its worker instead of retaining it for 30 seconds. Redirect navigation also intentionally creates a fresh GET draft without inherited credentials, and its response-derived query rows remain literal until the user edits them.
+
+## Resolved: request editing quality of life (17 September 2026)
+
+The owner requested QOL proposals 1, 5, 9, 13, 2, and 8. Sidebar search now matches each whitespace-separated word independently, ignoring case, and supports Up/Down selection, Enter to open and focus the URL without sending, and Escape to clear. Key/value row editors use Enter to move from name to value and append a new row from a populated final value field; an empty row does not append again.
+
+OpenAPI review offers selection and deselection of matching operations while retaining explicit whole-spec actions and matching/total-selected counts. Response copying says Copy page or Copy body and identifies Raw/Pretty text in its tooltip. URL template completion offers environment, request, and secret variable names, with arrows, Enter insertion, Escape dismissal, and mouse selection; it never displays secret values. Completion remains limited to the URL field.
+
+Validation on 17 September 2026: `cargo fmt --all -- --check`, workspace Clippy with warnings denied, and `cargo test --workspace` passed, including headless keyboard regressions for search navigation, row entry, and secret-name completion. These checks establish behavior, not an observed usability speedup or an interactive desktop walkthrough.
