@@ -653,7 +653,26 @@ impl Duckie {
                 .map(|c| c.manifest.name.as_str())
                 .unwrap_or("Scratch workspace"),
         );
-        ui.add(
+        let search_id = egui::Id::new("request-search");
+        let focused = ui.memory(|m| m.has_focus(search_id));
+        let mut direction = 0isize;
+        let mut open = false;
+        if focused {
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    direction = 1;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    direction = -1;
+                }
+                open = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                    self.search.clear();
+                    self.search_selected = None;
+                }
+            });
+        }
+        let search_field = ui.add(
             egui::TextEdit::singleline(&mut self.search)
                 .id(egui::Id::new("request-search"))
                 .hint_text("Find requests…   Ctrl+K")
@@ -661,10 +680,47 @@ impl Duckie {
         );
         ui.add_space(4.0);
         let rows = self.sidebar_rows();
+        let matches: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| match r {
+                SidebarRow::Request(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        if search_field.changed() || !matches.contains(&self.search_selected.unwrap_or(usize::MAX))
+        {
+            self.search_selected = matches.first().copied();
+        }
+        if direction != 0 && !matches.is_empty() {
+            let at = matches
+                .iter()
+                .position(|i| Some(*i) == self.search_selected)
+                .unwrap_or(0);
+            self.search_selected = Some(
+                matches[(at as isize + direction).clamp(0, matches.len() as isize - 1) as usize],
+            );
+        }
+        if open && let Some(index) = self.search_selected {
+            self.selected = index;
+            self.focus_url = true;
+            self.clock += 1;
+            if let Some(view) = self.responses.get_mut(&self.drafts[index].request.id) {
+                view.viewed = self.clock;
+            }
+        }
+
         let mut toggle = None;
         let mut move_by = None;
-        egui::ScrollArea::vertical()
-            .id_salt("requests")
+        let mut scroll = egui::ScrollArea::vertical().id_salt("requests");
+        if focused
+            && (direction != 0 || search_field.changed())
+            && let Some(at) = rows.iter().position(
+                |r| matches!(r, SidebarRow::Request(i) if Some(*i) == self.search_selected),
+            )
+        {
+            scroll = scroll.vertical_scroll_offset(at as f32 * 38.0);
+        }
+        scroll
             .max_height((ui.available_height() - 125.0).max(100.0))
             .show_rows(ui, 38.0, rows.len(), |ui, range| {
                 for row in &rows[range] {
@@ -703,8 +759,15 @@ impl Duckie {
                             let response = ui
                                 .add_sized(
                                     [ui.available_width(), 32.0],
-                                    egui::Button::selectable(self.selected == i, "")
-                                        .left_text(RichText::new(text).size(13.0)),
+                                    egui::Button::selectable(
+                                        if focused {
+                                            self.search_selected == Some(i)
+                                        } else {
+                                            self.selected == i
+                                        },
+                                        "",
+                                    )
+                                    .left_text(RichText::new(text).size(13.0)),
                                 )
                                 .on_hover_text(format!(
                                     "{}\n{}",
