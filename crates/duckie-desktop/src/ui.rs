@@ -1507,7 +1507,19 @@ impl Duckie {
                             ui.weak("first matches only");
                         }
                     }
-                    if ui.button("Copy").clicked() {
+                    let paged = view.offset > 0 || view.result.body.len() > view.page;
+                    let mode = if self.pretty && view.pretty.is_some() {
+                        "Pretty"
+                    } else {
+                        "Raw"
+                    };
+                    if ui
+                        .button(if paged { "Copy page" } else { "Copy body" })
+                        .on_hover_text(format!(
+                            "Copy displayed {mode} text. Save body exports the retained body."
+                        ))
+                        .clicked()
+                    {
                         ui.ctx().copy_text(
                             if self.pretty {
                                 view.pretty.as_ref().unwrap_or(&view.preview)
