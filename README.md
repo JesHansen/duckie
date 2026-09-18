@@ -75,6 +75,14 @@ In Settings, **Folder / group** lets you choose an existing folder, choose
 the field loses focus; names differing in case remain separate. The sidebar's
 **Move to folder** action uses the same picker.
 
+**New request** inherits the selected folder. A leading `{{env.baseUrl}}` reference
+is retained (including its configured base path); other leading environment
+references are retained when they resolve to an HTTP(S) base without credentials,
+query, or fragment. Concrete URLs fall back to their origin (scheme, host, port),
+because Duckie cannot infer an API base path. Other URLs start empty. New requests
+keep default name/method and do not copy authentication, query values, headers,
+bodies, or tests. Opening a response Location still creates a fresh GET request.
+
 Useful shortcuts:
 
 | Shortcut | Action |

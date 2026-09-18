@@ -201,6 +201,14 @@ after reorder, edit, and deletion.
 
 ## Implementation cautions
 
+Contextual new requests (accepted proposal 8) were completed on 18 September 2026.
+The README defines explicit environment-base inheritance and the concrete-origin
+fallback. New drafts receive fresh IDs and default request content, and are dirty;
+redirect navigation uses the separate fresh-draft path. Formatting, workspace
+Clippy with warnings denied, workspace tests, and the focused inheritance regression
+passed on 18 September, covering origin credential stripping, base templates, and
+fresh redirect behavior.
+
 The editable folder picker (accepted proposal 7) was completed on 18 September
 2026. Settings reuses the Move to folder picker, including existing collection
 folders, explicit Ungrouped, and trimmed free-text creation without case merging.

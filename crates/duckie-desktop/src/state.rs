@@ -649,6 +649,15 @@ impl Duckie {
         }
     }
     pub fn new_request(&mut self) {
+        let selected = &self.drafts[self.selected].request;
+        let folder = selected.folder.clone();
+        let url = inherited_url_base(&selected.url, &self.envs[self.env_index].values);
+        self.fresh_request();
+        self.drafts[self.selected].request.folder = folder;
+        self.drafts[self.selected].request.url = url;
+        self.drafts[self.selected].dirty = true;
+    }
+    pub fn fresh_request(&mut self) {
         self.drafts.push(Draft::default());
         self.selected = self.drafts.len() - 1;
         self.focus_url = true;
@@ -1663,6 +1672,32 @@ impl Duckie {
             }
         }
     }
+}
+
+fn inherited_url_base(url: &str, environment: &Values) -> String {
+    if let Some(rest) = url.strip_prefix("{{env.")
+        && let Some((name, suffix)) = rest.split_once("}}")
+        && (suffix.is_empty() || suffix.starts_with('/'))
+        && (name == "baseUrl"
+            || environment.get(name).is_some_and(|value| {
+                url::Url::parse(value).is_ok_and(|base| {
+                    matches!(base.scheme(), "http" | "https")
+                        && base.username().is_empty()
+                        && base.password().is_none()
+                        && base.query().is_none()
+                        && base.fragment().is_none()
+                })
+            }))
+    {
+        return format!("{{{{env.{name}}}}}/");
+    }
+    if (url.to_ascii_lowercase().starts_with("http://")
+        || url.to_ascii_lowercase().starts_with("https://"))
+        && let Ok(parsed) = url::Url::parse(url)
+    {
+        return format!("{}/", parsed.origin().ascii_serialization());
+    }
+    String::new()
 }
 
 #[cfg(test)]

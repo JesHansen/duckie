@@ -2490,7 +2490,7 @@ impl Duckie {
         if let Some((base, value)) = location {
             match url_join(&base, &value) {
                 Ok(url) => {
-                    self.new_request();
+                    self.fresh_request();
                     self.drafts[self.selected].request.set_literal_address(&url);
                     self.drafts[self.selected].request.name = "Redirect location".into();
                     self.touch();
@@ -2774,6 +2774,37 @@ impl eframe::App for Duckie {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_request_inherits_only_folder_and_url_base() {
+        let (_, mut app) = app_with(&["API"]);
+        let original_id = app.drafts[0].request.id.clone();
+        app.drafts[0].request.url = "https://user:password@api.test:8443/v2/items".into();
+        app.drafts[0]
+            .request
+            .query
+            .push(Row::new("token", "private"));
+        app.drafts[0]
+            .request
+            .headers
+            .push(Row::new("X-Key", "private"));
+        app.drafts[0].source = "// tests".into();
+        app.new_request();
+        let request = &app.drafts[1].request;
+        assert_ne!(request.id, original_id);
+        assert_eq!(request.folder, "API");
+        assert_eq!(request.url, "https://api.test:8443/");
+        assert!(request.query.is_empty() && request.headers.is_empty());
+        assert!(app.drafts[1].source.is_empty());
+        app.drafts[1].request.url = "{{env.baseUrl}}/items/{{request.id}}".into();
+        app.new_request();
+        assert_eq!(app.drafts[2].request.url, "{{env.baseUrl}}/");
+        app.fresh_request();
+        assert!(app.drafts[3].request.folder.is_empty());
+        assert!(app.drafts[3].request.url.is_empty());
+        app.drafts[3].request.url = "{{secret.host}}/items".into();
+        app.new_request();
+        assert!(app.drafts[4].request.url.is_empty());
+    }
     #[test]
     fn sidebar_filter_matches_words_across_fields_and_unicode() {
         let (_, mut app) = app_with(&["Users", "Other"]);
