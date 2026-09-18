@@ -201,6 +201,15 @@ after reorder, edit, and deletion.
 
 ## Implementation cautions
 
+JSON tree navigation (accepted proposal 3) was completed on 18 September 2026.
+Selection, pointer input, expansion, and filter live with each retained response and
+reset for a new response. Expand/collapse controls retain the 10,000-row virtualized
+layout cap and existing 2 MiB/128-level parse limits. Key/value filtering searches
+the bounded parsed tree and keeps matching ancestors reachable. A focused tree
+supports arrows and Home/End. Formatting, workspace Clippy with warnings denied,
+and workspace tests passed on 18 September, including escaped-pointer filtering,
+late matches, row caps, and keyboard expansion/movement regressions.
+
 - **Save covers the collection.** All dirty drafts save together. Reordering changes the manifest and must mark it dirty even if no request content changed. Deletion removes the manifest entry on Save but retains unreferenced files. Body and test content loads lazily, per request, on first selection or Send; see below.
 - **A `pending` draft's body/source are placeholders, not empty content.** Any new code path that reads `Draft.request.body` or `Draft.source` — not just the ones that already do — must either go through a draft that is not `pending`, or call `Duckie::ensure_loaded` first. `save_collection`'s pre-save hydration loop is the backstop, but do not add a second way to reach `Collection::save` that skips it.
 - **The 24-hour spool threshold protects other instances.** Windows permits deletion of files opened with `FILE_SHARE_DELETE`; a file can still be in use by another Duckie instance. Do not shorten the threshold without a replacement ownership guard.

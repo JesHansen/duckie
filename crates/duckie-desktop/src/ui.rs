@@ -39,19 +39,82 @@ struct JsonRow<'a> {
     value: &'a serde_json::Value,
     depth: usize,
 }
+#[cfg(test)]
 fn json_rows<'a>(
     value: &'a serde_json::Value,
     expanded: &std::collections::BTreeSet<String>,
 ) -> Vec<JsonRow<'a>> {
+    json_rows_filtered(value, expanded, false, "")
+}
+fn json_rows_filtered<'a>(
+    value: &'a serde_json::Value,
+    expanded: &std::collections::BTreeSet<String>,
+    all: bool,
+    filter: &str,
+) -> Vec<JsonRow<'a>> {
+    // The parsed tree has the existing 2 MiB/128-level bounds. Search all of it so
+    // a match after the first 10,000 nodes can still be reached, but cap layout rows.
+    fn matches(
+        value: &serde_json::Value,
+        label: &str,
+        pointer: &str,
+        query: &str,
+        keep: &mut std::collections::BTreeSet<String>,
+    ) -> bool {
+        let mut found = label.to_lowercase().contains(query)
+            || (!value.is_object()
+                && !value.is_array()
+                && json_value_text(value).to_lowercase().contains(query));
+        match value {
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    found |= matches(
+                        value,
+                        key,
+                        &format!("{pointer}/{}", pointer_part(key)),
+                        query,
+                        keep,
+                    );
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (i, value) in values.iter().enumerate() {
+                    found |= matches(
+                        value,
+                        &format!("[{i}]"),
+                        &format!("{pointer}/{i}"),
+                        query,
+                        keep,
+                    );
+                }
+            }
+            _ => {}
+        }
+        if found {
+            keep.insert(pointer.to_string());
+        }
+        found
+    }
+    let mut keep = std::collections::BTreeSet::new();
+    if !filter.trim().is_empty() {
+        matches(value, "$", "", &filter.trim().to_lowercase(), &mut keep);
+    }
+    let filtering = !filter.trim().is_empty();
+    struct Visibility<'a> {
+        expanded: &'a std::collections::BTreeSet<String>,
+        keep: &'a std::collections::BTreeSet<String>,
+        filtering: bool,
+        all: bool,
+    }
     fn visit<'a>(
         rows: &mut Vec<JsonRow<'a>>,
         label: String,
         pointer: String,
         value: &'a serde_json::Value,
         depth: usize,
-        expanded: &std::collections::BTreeSet<String>,
+        visibility: &Visibility<'_>,
     ) {
-        if rows.len() >= 10_000 {
+        if rows.len() >= 10_000 || (visibility.filtering && !visibility.keep.contains(&pointer)) {
             return;
         }
         rows.push(JsonRow {
@@ -60,7 +123,7 @@ fn json_rows<'a>(
             value,
             depth,
         });
-        if !expanded.contains(&pointer) {
+        if !visibility.filtering && !visibility.all && !visibility.expanded.contains(&pointer) {
             return;
         }
         match value {
@@ -72,19 +135,22 @@ fn json_rows<'a>(
                         format!("{pointer}/{}", pointer_part(key)),
                         value,
                         depth + 1,
-                        expanded,
+                        visibility,
                     )
                 }
             }
             serde_json::Value::Array(values) => {
                 for (index, value) in values.iter().enumerate() {
+                    if rows.len() >= 10_000 {
+                        break;
+                    }
                     visit(
                         rows,
                         format!("[{index}]"),
                         format!("{pointer}/{index}"),
                         value,
                         depth + 1,
-                        expanded,
+                        visibility,
                     )
                 }
             }
@@ -92,8 +158,74 @@ fn json_rows<'a>(
         }
     }
     let mut rows = vec![];
-    visit(&mut rows, "$".into(), String::new(), value, 0, expanded);
+    visit(
+        &mut rows,
+        "$".into(),
+        String::new(),
+        value,
+        0,
+        &Visibility {
+            expanded,
+            keep: &keep,
+            filtering,
+            all,
+        },
+    );
     rows
+}
+
+fn json_tree_key(tree: &mut JsonTreeState, rows: &[JsonRow<'_>], key: egui::Key) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    let current = rows
+        .iter()
+        .position(|r| r.pointer == tree.selected)
+        .unwrap_or(0);
+    let row = &rows[current];
+    let next = match key {
+        egui::Key::ArrowDown => (current + 1).min(rows.len() - 1),
+        egui::Key::ArrowUp => current.saturating_sub(1),
+        egui::Key::Home => 0,
+        egui::Key::End => rows.len() - 1,
+        egui::Key::ArrowRight => {
+            if row.value.is_object() || row.value.is_array() {
+                if !tree.expand_all
+                    && tree.filter.trim().is_empty()
+                    && tree.expanded.insert(row.pointer.clone())
+                {
+                    current
+                } else if rows.get(current + 1).is_some_and(|r| r.depth > row.depth) {
+                    current + 1
+                } else {
+                    current
+                }
+            } else {
+                current
+            }
+        }
+        egui::Key::ArrowLeft => {
+            if tree.expand_all {
+                tree.expanded = rows
+                    .iter()
+                    .filter(|r| r.value.is_object() || r.value.is_array())
+                    .map(|r| r.pointer.clone())
+                    .collect();
+                tree.expand_all = false;
+            }
+            if tree.filter.trim().is_empty() && tree.expanded.remove(&row.pointer) {
+                current
+            } else {
+                rows[..current]
+                    .iter()
+                    .rposition(|r| r.depth < row.depth)
+                    .unwrap_or(current)
+            }
+        }
+        _ => current,
+    };
+    tree.selected = rows[next].pointer.clone();
+    Some(next)
 }
 pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
     let mut changed = false;
@@ -1798,38 +1930,84 @@ impl Duckie {
                 if let Some(json) = &view.json {
                     ui.horizontal(|ui| {
                         ui.label("Pointer");
-                        ui.text_edit_singleline(&mut self.json_path);
+                        ui.text_edit_singleline(&mut view.tree.path);
                         if ui.button("Go").clicked() {
-                            if json.pointer(&self.json_path).is_some() {
-                                self.json_selected = self.json_path.clone();
+                            if json.pointer(&view.tree.path).is_some() {
+                                view.tree.selected = view.tree.path.clone();
+                                let mut pointer = view.tree.path.as_str();
+                                while let Some((parent, _)) = pointer.rsplit_once('/') {
+                                    view.tree.expanded.insert(parent.to_string());
+                                    pointer = parent;
+                                }
                             } else {
                                 self.status = "JSON pointer was not found".into();
                             }
                         }
                     });
-                    let selected = json.pointer(&self.json_selected).unwrap_or(json);
+                    ui.horizontal(|ui| {
+                        ui.label("Filter keys / values");
+                        ui.text_edit_singleline(&mut view.tree.filter);
+                        if ui.button("Clear filter").clicked() {
+                            view.tree.filter.clear();
+                        }
+                        if ui.button("Expand all").clicked() {
+                            view.tree.expand_all = true;
+                        }
+                        if ui.button("Collapse all").clicked() {
+                            view.tree.expand_all = false;
+                            view.tree.expanded.clear();
+                            view.tree.selected.clear();
+                        }
+                    });
+                    ui.weak("Click a value, then use ↑/↓, ←/→, Home/End. Filtering keeps matching ancestors open.");
+                    let selected = json.pointer(&view.tree.selected).unwrap_or(json);
                     ui.horizontal_wrapped(|ui| {
-                        ui.monospace(if self.json_selected.is_empty() {
+                        ui.monospace(if view.tree.selected.is_empty() {
                             "/ (root)"
                         } else {
-                            &self.json_selected
+                            &view.tree.selected
                         });
                         if ui.button("Copy value").clicked() {
                             ui.ctx().copy_text(json_value_text(selected));
                         }
                         if ui.button("Copy JSON Pointer").clicked() {
-                            ui.ctx().copy_text(self.json_selected.clone());
+                            ui.ctx().copy_text(view.tree.selected.clone());
                         }
-                        let sensitive=self.json_selected.to_ascii_lowercase().contains("token")||self.json_selected.to_ascii_lowercase().contains("password")||self.json_selected.to_ascii_lowercase().contains("secret");
-                        if ui.button("Assert type").clicked(){let kind=match selected{serde_json::Value::Null=>"null",serde_json::Value::Bool(_)=>"boolean",serde_json::Value::Number(_)=>"number",serde_json::Value::String(_)=>"string",serde_json::Value::Array(_)=>"array",serde_json::Value::Object(_)=>"object"};let p=serde_json::to_string(&self.json_selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON value has expected type\", () => {{\n  expect(response.jsonPointer({p}), {p}).toBeType(\"{kind}\");\n}});\n"));}
-                        if matches!(selected,serde_json::Value::Array(_))&&ui.button("Assert array length").clicked(){let len=selected.as_array().unwrap().len();let p=serde_json::to_string(&self.json_selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON array has expected length\", () => {{\n  expect(response.jsonPointer({p}).length, {p}).toBe({len});\n}});\n"));}
-                        if !sensitive&&ui.button("Assert observed value").clicked(){let p=serde_json::to_string(&self.json_selected).unwrap();let value=serde_json::to_string(selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON value matches the observed contract\", () => {{\n  expect(response.jsonPointer({p}), {p}).toEqual({value});\n}});\n"));}
+                        let sensitive=view.tree.selected.to_ascii_lowercase().contains("token")||view.tree.selected.to_ascii_lowercase().contains("password")||view.tree.selected.to_ascii_lowercase().contains("secret");
+                        if ui.button("Assert type").clicked(){let kind=match selected{serde_json::Value::Null=>"null",serde_json::Value::Bool(_)=>"boolean",serde_json::Value::Number(_)=>"number",serde_json::Value::String(_)=>"string",serde_json::Value::Array(_)=>"array",serde_json::Value::Object(_)=>"object"};let p=serde_json::to_string(&view.tree.selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON value has expected type\", () => {{\n  expect(response.jsonPointer({p}), {p}).toBeType(\"{kind}\");\n}});\n"));}
+                        if matches!(selected,serde_json::Value::Array(_))&&ui.button("Assert array length").clicked(){let len=selected.as_array().unwrap().len();let p=serde_json::to_string(&view.tree.selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON array has expected length\", () => {{\n  expect(response.jsonPointer({p}).length, {p}).toBe({len});\n}});\n"));}
+                        if !sensitive&&ui.button("Assert observed value").clicked(){let p=serde_json::to_string(&view.tree.selected).unwrap();let value=serde_json::to_string(selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON value matches the observed contract\", () => {{\n  expect(response.jsonPointer({p}), {p}).toEqual({value});\n}});\n"));}
                     });
                     ui.separator();
-                    let rows = json_rows(json, &self.json_expanded);
+                    let rows = json_rows_filtered(
+                        json,
+                        &view.tree.expanded,
+                        view.tree.expand_all,
+                        &view.tree.filter,
+                    );
                     let count = rows.len();
                     let height = ui.spacing().interact_size.y;
-                    egui::ScrollArea::vertical().show_rows(ui, height, count, |ui, range| {
+                    let tree_id = egui::Id::new(("json-tree", &view.result.run_id));
+                    let mut reveal = None;
+                    if ui.memory(|m| m.has_focus(tree_id)) {
+                        for key in [
+                            egui::Key::ArrowDown,
+                            egui::Key::ArrowUp,
+                            egui::Key::ArrowLeft,
+                            egui::Key::ArrowRight,
+                            egui::Key::Home,
+                            egui::Key::End,
+                        ] {
+                            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                                reveal = json_tree_key(&mut view.tree, &rows, key);
+                            }
+                        }
+                    }
+                    let mut scroll = egui::ScrollArea::vertical().id_salt(tree_id);
+                    if let Some(index) = reveal {
+                        scroll = scroll.vertical_scroll_offset(index as f32 * height);
+                    }
+                    let output = scroll.show_rows(ui, height, count, |ui, range| {
                         for row in &rows[range] {
                             ui.horizontal(|ui| {
                                 ui.add_space(row.depth as f32 * 16.0);
@@ -1840,7 +2018,10 @@ impl Duckie {
                                 if container
                                     && ui
                                         .small_button(
-                                            if self.json_expanded.contains(&row.pointer) {
+                                            if view.tree.expand_all
+                                                || !view.tree.filter.trim().is_empty()
+                                                || view.tree.expanded.contains(&row.pointer)
+                                            {
                                                 "▾"
                                             } else {
                                                 "▸"
@@ -1848,8 +2029,16 @@ impl Duckie {
                                         )
                                         .clicked()
                                 {
-                                    if !self.json_expanded.remove(&row.pointer) {
-                                        self.json_expanded.insert(row.pointer.clone());
+                                    if view.tree.expand_all {
+                                        view.tree.expanded = rows
+                                            .iter()
+                                            .filter(|r| r.value.is_object() || r.value.is_array())
+                                            .map(|r| r.pointer.clone())
+                                            .collect();
+                                        view.tree.expand_all = false;
+                                    }
+                                    if !view.tree.expanded.remove(&row.pointer) {
+                                        view.tree.expanded.insert(row.pointer.clone());
                                     }
                                 } else if !container {
                                     ui.add_space(22.0);
@@ -1861,16 +2050,25 @@ impl Duckie {
                                 };
                                 if ui
                                     .selectable_label(
-                                        self.json_selected == row.pointer,
+                                        view.tree.selected == row.pointer,
                                         format!("{}: {detail}", row.label),
                                     )
                                     .clicked()
                                 {
-                                    self.json_selected = row.pointer.clone();
+                                    view.tree.selected = row.pointer.clone();
+                                    ui.memory_mut(|m| m.request_focus(tree_id));
                                 }
                             });
                         }
                     });
+                    ui.interact(
+                        output.inner_rect,
+                        tree_id,
+                        egui::Sense::focusable_noninteractive(),
+                    );
+                    if count == 0 {
+                        ui.weak("No matching keys or values");
+                    }
                     if count >= 10_000 {
                         ui.weak("Showing the first 10,000 expanded values");
                     }
@@ -2444,6 +2642,45 @@ impl eframe::App for Duckie {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn json_filter_reaches_descendants_and_expand_all_stays_bounded() {
+        let json = serde_json::json!({"a/b": {"~key": "Needle"}, "other": 2});
+        let expanded = std::collections::BTreeSet::new();
+        let rows = json_rows_filtered(&json, &expanded, false, "needle");
+        assert_eq!(
+            rows.iter().map(|r| r.pointer.as_str()).collect::<Vec<_>>(),
+            ["", "/a~1b", "/a~1b/~0key"]
+        );
+        assert!(json_rows_filtered(&json, &expanded, false, "absent").is_empty());
+        let large =
+            serde_json::Value::Array((0..20_000).map(|i| serde_json::json!({"n":i})).collect());
+        assert_eq!(
+            json_rows_filtered(&large, &expanded, true, "").len(),
+            10_000
+        );
+        let late = json_rows_filtered(&large, &expanded, false, "19999");
+        assert!(late.iter().any(|r| r.pointer == "/19999/n"));
+    }
+    #[test]
+    fn json_keyboard_moves_and_expands_without_sharing_state() {
+        let json = serde_json::json!({"a": {"b": 1}, "z": 2});
+        let mut tree = JsonTreeState::default();
+        let rows = json_rows_filtered(&json, &tree.expanded, false, "");
+        json_tree_key(&mut tree, &rows, egui::Key::ArrowDown);
+        assert_eq!(tree.selected, "/a");
+        json_tree_key(&mut tree, &rows, egui::Key::ArrowRight);
+        assert!(tree.expanded.contains("/a"));
+        let rows = json_rows_filtered(&json, &tree.expanded, false, "");
+        json_tree_key(&mut tree, &rows, egui::Key::ArrowRight);
+        assert_eq!(tree.selected, "/a/b");
+        json_tree_key(&mut tree, &rows, egui::Key::ArrowLeft);
+        assert_eq!(tree.selected, "/a");
+        json_tree_key(&mut tree, &rows, egui::Key::ArrowLeft);
+        assert!(!tree.expanded.contains("/a"));
+        let fresh = JsonTreeState::default();
+        assert!(fresh.selected.is_empty());
+        assert_eq!(fresh.expanded.len(), 1);
+    }
     #[test]
     fn suite_navigation_uses_identity_and_checks_executed_source() {
         let (_, mut app) = app_with(&["", ""]);
@@ -3031,6 +3268,7 @@ mod tests {
         app.responses.insert(
             id.clone(),
             ResponseView {
+                tree: JsonTreeState::default(),
                 json: None,
                 result: ExecutionResult {
                     request_id: id,
@@ -3191,6 +3429,7 @@ mod tests {
         app.responses.insert(
             id.clone(),
             ResponseView {
+                tree: JsonTreeState::default(),
                 json: Some(serde_json::json!({"duck":1,"duck2":2})),
                 result: ExecutionResult {
                     request_id: id.clone(),

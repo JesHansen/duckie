@@ -223,7 +223,26 @@ pub struct BodySearch {
     pub running: bool,
     pub capped: bool,
 }
+pub struct JsonTreeState {
+    pub selected: String,
+    pub expanded: BTreeSet<String>,
+    pub expand_all: bool,
+    pub path: String,
+    pub filter: String,
+}
+impl Default for JsonTreeState {
+    fn default() -> Self {
+        Self {
+            selected: String::new(),
+            expanded: [String::new()].into_iter().collect(),
+            expand_all: false,
+            path: String::new(),
+            filter: String::new(),
+        }
+    }
+}
 pub struct ResponseView {
+    pub tree: JsonTreeState,
     pub result: ExecutionResult,
     pub preview: String,
     pub pretty: Option<String>,
@@ -379,9 +398,6 @@ pub struct Duckie {
     pub search: String,
     pub search_selected: Option<usize>,
     pub response_find: crate::editor::Find,
-    pub json_path: String,
-    pub json_selected: String,
-    pub json_expanded: BTreeSet<String>,
     pub editor_find: crate::editor::Find,
     /// Last frame's focus, so Ctrl+F can route to whichever editor the caret is in.
     pub editor_focused: bool,
@@ -469,9 +485,6 @@ impl Duckie {
             search: String::new(),
             search_selected: None,
             response_find: Default::default(),
-            json_path: String::new(),
-            json_selected: String::new(),
-            json_expanded: [String::new()].into_iter().collect(),
             editor_find: Default::default(),
             editor_focused: false,
             goto_line: None,
@@ -1059,6 +1072,7 @@ impl Duckie {
                     self.responses.insert(
                         id,
                         ResponseView {
+                            tree: JsonTreeState::default(),
                             test_revision: result.summary.revision,
                             result,
                             preview: "Preparing preview…".into(),
