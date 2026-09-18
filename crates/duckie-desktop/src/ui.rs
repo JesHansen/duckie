@@ -2445,6 +2445,48 @@ impl eframe::App for Duckie {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn suite_navigation_uses_identity_and_checks_executed_source() {
+        let (_, mut app) = app_with(&["", ""]);
+        let id = app.drafts[1].request.id.clone();
+        app.drafts[1].source = "assert.ok(false);".into();
+        app.suite
+            .sources
+            .insert(id.clone(), app.drafts[1].source.clone());
+        let report = duckie_app::HeadlessReport {
+            request_id: id,
+            request_name: "executed".into(),
+            environment: "dev".into(),
+            revision: 7,
+            outcome: duckie_model::Outcome::Complete,
+            status: Some(200),
+            duration_ms: 0,
+            response_bytes: 0,
+            response_snippet: None,
+            error: None,
+            tests: Some(duckie_model::TestReport {
+                tests: vec![duckie_model::TestCase {
+                    name: "fails".into(),
+                    passed: false,
+                    error: None,
+                    line: Some(1),
+                }],
+                ..Default::default()
+            }),
+        };
+        app.drafts.swap(0, 1);
+        app.navigate_suite_result(&report);
+        assert_eq!(app.selected, 0);
+        assert!(app.request_tab == RequestTab::Tests);
+        assert_eq!(app.goto_line, Some(1));
+        app.drafts[0].source.push_str("\n// changed");
+        app.navigate_suite_result(&report);
+        assert_eq!(app.goto_line, None);
+        assert!(app.status.contains("tests have changed"));
+        app.drafts.remove(0);
+        app.navigate_suite_result(&report);
+        assert!(app.status.contains("deleted"));
+    }
+    #[test]
     fn environment_lifecycle_keeps_credentials_scoped() {
         let (_, mut app) = app_with(&[""]);
         app.envs = vec![duckie_model::Environment {

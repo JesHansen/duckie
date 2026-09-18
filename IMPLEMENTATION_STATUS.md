@@ -186,6 +186,19 @@ remembered secrets file is rebuilt, including when no credentials remain.
 Validation on 18 September 2026: workspace formatting, Clippy with warnings denied,
 and workspace tests passed, including lifecycle and save/reopen regressions.
 
+## Resolved: suite progress and result navigation (18 September 2026)
+
+The second accepted proposal in TO_IMPLEMENT_QOL.md is implemented. The shared suite
+runner emits starts and completions while retaining frozen inputs, sequential order,
+cancellation, and stop-on-failure. The desktop shows completed/total counts and the
+current request, and fills results as they finish. Selecting a result opens Tests by
+request ID. A failing assertion line is selected only if current test source matches
+the executed snapshot; changed tests and deleted requests receive explicit messages.
+
+Validation on 18 September 2026: formatting, workspace Clippy with warnings denied,
+and workspace tests passed, including progress ordering, stop/cancel, and navigation
+after reorder, edit, and deletion.
+
 ## Implementation cautions
 
 - **Save covers the collection.** All dirty drafts save together. Reordering changes the manifest and must mark it dirty even if no request content changed. Deletion removes the manifest entry on Save but retains unreferenced files. Body and test content loads lazily, per request, on first selection or Send; see below.

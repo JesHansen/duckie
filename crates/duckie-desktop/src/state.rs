@@ -281,6 +281,7 @@ pub enum IoEvent {
     Secrets(Result<SecretsFile>),
     DiskChanged(Vec<(String, duckie_storage::Change)>),
     SuiteFinished(Vec<duckie_app::HeadlessReport>),
+    SuiteProgress(duckie_app::SuiteProgress),
 }
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Preferences {
@@ -344,6 +345,9 @@ pub struct SuiteUi {
     pub running: bool,
     pub cancel: Option<CancellationToken>,
     pub results: Vec<duckie_app::HeadlessReport>,
+    pub current: Option<(String, String)>,
+    pub total: usize,
+    pub sources: BTreeMap<String, String>,
 }
 pub struct Duckie {
     #[cfg(feature = "bench")]
@@ -733,7 +737,7 @@ impl Duckie {
                 return;
             }
         }
-        let requests = self
+        let requests: Vec<_> = self
             .drafts
             .iter()
             .filter(|d| ids.contains(&d.request.id))
@@ -747,22 +751,70 @@ impl Duckie {
         let ctx = self.ctx.clone();
         let stop = self.suite.stop_on_failure;
         self.suite.running = true;
+        self.suite.total = requests.len();
+        self.suite.current = None;
+        self.suite.sources = requests
+            .iter()
+            .map(|(r, source, _)| (r.id.clone(), source.clone()))
+            .collect();
         self.suite.results.clear();
         self.suite.cancel = Some(cancel);
         self.status = format!("Running {} request(s)…", ids.len());
         self.service.runtime().spawn(async move {
-            let reports = duckie_app::execute_headless_suite(
+            let reports = duckie_app::execute_headless_suite_with_progress(
                 &http,
                 requests,
                 environment,
                 token,
                 stop,
                 false,
+                |event| {
+                    let tx = tx.clone();
+                    let ctx = ctx.clone();
+                    async move {
+                        let _ = tx.send(IoEvent::SuiteProgress(event)).await;
+                        ctx.request_repaint();
+                    }
+                },
             )
             .await;
             let _ = tx.send(IoEvent::SuiteFinished(reports)).await;
             ctx.request_repaint();
         });
+    }
+    pub fn navigate_suite_result(&mut self, report: &duckie_app::HeadlessReport) {
+        let Some(index) = self
+            .drafts
+            .iter()
+            .position(|d| d.request.id == report.request_id)
+        else {
+            self.status =
+                "This request has been deleted; its executed result remains in the suite.".into();
+            return;
+        };
+        if !self.ensure_loaded(&report.request_id) {
+            return;
+        }
+        self.selected = index;
+        self.request_tab = RequestTab::Tests;
+        self.goto_line = None;
+        if self.suite.sources.get(&report.request_id) == Some(&self.drafts[index].source) {
+            self.goto_line = report
+                .tests
+                .as_ref()
+                .and_then(|t| t.tests.iter().find(|t| !t.passed))
+                .and_then(|t| t.line);
+            self.status = format!(
+                "Executed revision {} · {}",
+                report.revision, report.request_name
+            );
+        } else {
+            self.status = format!(
+                "Executed revision {}: tests have changed; showing current tests without an assertion jump.",
+                report.revision
+            );
+        }
+        self.suite.open = false;
     }
     pub fn touch(&mut self) {
         let d = &mut self.drafts[self.selected];
@@ -1178,11 +1230,22 @@ impl Duckie {
                     }
                 }
                 IoEvent::SuiteFinished(reports) => {
+                    self.suite.current = None;
                     self.suite.running = false;
                     self.suite.cancel = None;
                     self.status = format!("Suite finished: {} result(s)", reports.len());
                     self.suite.results = reports;
                 }
+                IoEvent::SuiteProgress(event) => match event {
+                    duckie_app::SuiteProgress::Started {
+                        request_id,
+                        request_name,
+                    } => self.suite.current = Some((request_id, request_name)),
+                    duckie_app::SuiteProgress::Completed(report) => {
+                        self.suite.current = None;
+                        self.suite.results.push(report);
+                    }
+                },
                 IoEvent::Message(result) => {
                     self.status = result.unwrap_or_else(|e| e.to_string());
                 }

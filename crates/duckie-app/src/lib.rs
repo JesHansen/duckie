@@ -112,11 +112,51 @@ pub async fn execute_headless_suite(
     stop_on_failure: bool,
     include_response_snippets: bool,
 ) -> Vec<HeadlessReport> {
+    execute_headless_suite_with_progress(
+        http,
+        requests,
+        environment,
+        cancel,
+        stop_on_failure,
+        include_response_snippets,
+        |_| async {},
+    )
+    .await
+}
+
+pub enum SuiteProgress {
+    Started {
+        request_id: String,
+        request_name: String,
+    },
+    Completed(HeadlessReport),
+}
+
+/// Progress observes the same frozen, sequential run; it never starts additional work.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_headless_suite_with_progress<F, Fut>(
+    http: &duckie_http::HttpEngine,
+    requests: Vec<(RequestDefinition, String, u64)>,
+    environment: EnvironmentSnapshot,
+    cancel: CancellationToken,
+    stop_on_failure: bool,
+    include_response_snippets: bool,
+    mut progress: F,
+) -> Vec<HeadlessReport>
+where
+    F: FnMut(SuiteProgress) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let mut reports = Vec::with_capacity(requests.len());
     for (request, source, revision) in requests {
         if cancel.is_cancelled() {
             break;
         }
+        progress(SuiteProgress::Started {
+            request_id: request.id.clone(),
+            request_name: request.name.clone(),
+        })
+        .await;
         reports.push(
             execute_headless(
                 http,
@@ -129,6 +169,7 @@ pub async fn execute_headless_suite(
             )
             .await,
         );
+        progress(SuiteProgress::Completed(reports.last().unwrap().clone())).await;
         if stop_on_failure
             && reports
                 .last()
@@ -586,6 +627,67 @@ impl ExecutionService {
 #[cfg(test)]
 mod feature_tests {
     use super::*;
+    #[tokio::test]
+    async fn suite_progress_is_ordered_and_obeys_stop_and_cancel() {
+        let http = duckie_http::HttpEngine::default();
+        let requests: Vec<_> = (0..3)
+            .map(|i| {
+                (
+                    RequestDefinition {
+                        id: format!("r{i}"),
+                        ..Default::default()
+                    },
+                    String::new(),
+                    i,
+                )
+            })
+            .collect();
+        let env = EnvironmentSnapshot {
+            name: "dev".into(),
+            values: Values::new(),
+            secrets: Values::new(),
+        };
+        let mut events = vec![];
+        let reports = execute_headless_suite_with_progress(
+            &http,
+            requests.clone(),
+            env.clone(),
+            CancellationToken::new(),
+            true,
+            false,
+            |event| {
+                events.push(match event {
+                    SuiteProgress::Started { request_id, .. } => format!("start:{request_id}"),
+                    SuiteProgress::Completed(r) => format!("done:{}:{}", r.request_id, r.revision),
+                });
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert_eq!(events, ["start:r0", "done:r0:0"]);
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].execution_failed());
+        let cancel = CancellationToken::new();
+        events.clear();
+        let reports = execute_headless_suite_with_progress(
+            &http,
+            requests,
+            env,
+            cancel.clone(),
+            false,
+            false,
+            |event| {
+                if let SuiteProgress::Completed(r) = event {
+                    events.push(r.request_id);
+                    cancel.cancel();
+                }
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(events, ["r0"]);
+    }
     fn result(status: u16, body: &str, headers: Vec<(String, String)>) -> ExecutionResult {
         ExecutionResult {
             request_id: "r".into(),

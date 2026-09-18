@@ -460,6 +460,7 @@ impl Duckie {
     fn suite_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.suite.open;
         let selected = self.drafts[self.selected].request.clone();
+        let mut navigate = None;
         egui::Window::new("Run requests").open(&mut open).default_width(720.0).show(ctx,|ui|{
             ui.horizontal(|ui|{ui.selectable_value(&mut self.suite.scope,0,"Selected request");ui.selectable_value(&mut self.suite.scope,1,"Current folder");ui.selectable_value(&mut self.suite.scope,2,"Collection");});
             ui.checkbox(&mut self.suite.stop_on_failure,"Stop on first failure");ui.weak(format!("Environment: {} · requests run sequentially with no retries",self.envs[self.env_index].name));
@@ -468,8 +469,8 @@ impl Duckie {
                 if ui.add_enabled(!self.suite.running,egui::Button::new("Run")).clicked(){self.start_suite();}
                 if self.suite.running&&ui.button("Cancel").clicked()&&let Some(token)=&self.suite.cancel{token.cancel();}
             });
-            if self.suite.running{ui.spinner();ui.label("Running…");}
-            if !self.suite.results.is_empty(){ui.separator();ui.strong("Results");egui::Grid::new("suite-results").striped(true).show(ui,|ui|{ui.weak("Result");ui.weak("Request");ui.weak("Status");ui.weak("Duration");ui.end_row();for r in &self.suite.results{let state=if r.execution_failed(){"ERROR"}else if r.assertion_failed(){"FAIL"}else{"PASS"};ui.label(state);ui.label(&r.request_name);ui.label(r.status.map_or("-".into(),|s|s.to_string()));ui.label(format!("{} ms",r.duration_ms));ui.end_row();}});ui.horizontal(|ui|{for (label,ext) in [("Export JSON…","json"),("Export JUnit…","xml"),("Export HTML…","html")]{if ui.button(label).clicked()&&let Some(path)=rfd::FileDialog::new().add_filter(ext,&[ext]).set_file_name(format!("duckie-report.{ext}")).save_file(){let content=match ext{"xml"=>duckie_app::junit(&self.suite.results),"html"=>duckie_app::html(&self.suite.results),_=>serde_json::to_string_pretty(&self.suite.results).unwrap_or_default()};self.status=match std::fs::write(&path,content){Ok(())=>format!("Saved report to {}",path.display()),Err(e)=>format!("Could not save report: {e}")};}}});ui.weak("Reports contain summaries by default; arbitrary response snippets require the CLI's explicit inclusion option.");}
+            if self.suite.running { ui.spinner(); ui.label(format!("Completed {} / {} · Running: {}", self.suite.results.len(), self.suite.total, self.suite.current.as_ref().map_or("Starting…", |(_, name)| name.as_str()))); }
+            if !self.suite.results.is_empty(){ui.separator();ui.strong("Results");egui::Grid::new("suite-results").striped(true).show(ui,|ui|{ui.weak("Result");ui.weak("Request");ui.weak("Status");ui.weak("Duration");ui.end_row();for r in &self.suite.results{let state=if r.execution_failed(){"ERROR"}else if r.assertion_failed(){"FAIL"}else{"PASS"};ui.label(state);if ui.selectable_label(false, &r.request_name).on_hover_text(format!("Open tests · executed revision {}", r.revision)).clicked() { navigate = Some(r.clone()); }ui.label(r.status.map_or("-".into(),|s|s.to_string()));ui.label(format!("{} ms",r.duration_ms));ui.end_row();}});ui.horizontal(|ui|{for (label,ext) in [("Export JSON…","json"),("Export JUnit…","xml"),("Export HTML…","html")]{if ui.button(label).clicked()&&let Some(path)=rfd::FileDialog::new().add_filter(ext,&[ext]).set_file_name(format!("duckie-report.{ext}")).save_file(){let content=match ext{"xml"=>duckie_app::junit(&self.suite.results),"html"=>duckie_app::html(&self.suite.results),_=>serde_json::to_string_pretty(&self.suite.results).unwrap_or_default()};self.status=match std::fs::write(&path,content){Ok(())=>format!("Saved report to {}",path.display()),Err(e)=>format!("Could not save report: {e}")};}}});ui.weak("Reports contain summaries by default; arbitrary response snippets require the CLI's explicit inclusion option.");}
         });
         if !open
             && self.suite.running
@@ -478,6 +479,9 @@ impl Duckie {
             token.cancel();
         }
         self.suite.open = open;
+        if let Some(report) = navigate {
+            self.navigate_suite_result(&report);
+        }
     }
     fn history_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.history_open;
