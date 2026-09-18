@@ -522,6 +522,15 @@ fn request_pane_height(tab: RequestTab, request: &RequestDefinition) -> f32 {
     }
 }
 impl Duckie {
+    fn collection_folders(&self) -> Vec<String> {
+        self.drafts
+            .iter()
+            .map(|d| d.request.folder.trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
     /// Groups the visible requests under their folders, in first-appearance order, which is the
     /// order the manifest stores and therefore the order the user controls.
     fn sidebar_rows(&self) -> Vec<SidebarRow> {
@@ -941,14 +950,7 @@ impl Duckie {
         let mut duplicate = None;
         let mut copy = None;
         let mut move_folder = None;
-        let folders: Vec<_> = self
-            .drafts
-            .iter()
-            .map(|d| d.request.folder.trim().to_string())
-            .filter(|f| !f.is_empty())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let folders = self.collection_folders();
         let mut scroll = egui::ScrollArea::vertical().id_salt("requests");
         if focused
             && (direction != 0 || search_field.changed())
@@ -1666,10 +1668,16 @@ impl Duckie {
                 ui.weak("JavaScript · 2 second limit · No network, filesystem, or Node.js API");
             }
             RequestTab::Settings => {
+                let folders = self.collection_folders();
                 let d = &mut self.drafts[self.selected];
                 egui::Grid::new("settings").num_columns(2).show(ui, |ui| {
                     ui.label("Folder / group");
-                    changed |= ui.text_edit_singleline(&mut d.request.folder).changed();
+                    changed |= folder_picker(
+                        ui,
+                        egui::Id::new(("settings-folder", &d.request.id)),
+                        &mut d.request.folder,
+                        &folders,
+                    );
                     ui.end_row();
                     ui.label("Timeout (ms)");
                     changed |= ui

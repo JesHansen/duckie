@@ -201,6 +201,12 @@ after reorder, edit, and deletion.
 
 ## Implementation cautions
 
+The editable folder picker (accepted proposal 7) was completed on 18 September
+2026. Settings reuses the Move to folder picker, including existing collection
+folders, explicit Ungrouped, and trimmed free-text creation without case merging.
+Formatting, workspace Clippy with warnings denied, and workspace tests passed on
+18 September; this validation is headless, not an interactive desktop walkthrough.
+
 Sidebar filter construction (accepted proposal 6) was completed on 18 September
 2026. Empty/whitespace-only queries skip all per-request searchable-text work.
 Nonempty queries are lowercased once and words match the four fields independently,

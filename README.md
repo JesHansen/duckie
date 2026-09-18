@@ -70,6 +70,11 @@ space after `:` is removed; query text and templates are preserved. Values must 
 single-line; existing multiline rows stay in the row editor. Apply returns to rows.
 Malformed text is kept and must be fixed before saving, sending, or exporting.
 
+In Settings, **Folder / group** lets you choose an existing folder, choose
+**Ungrouped**, or type a new name. Leading/trailing whitespace is trimmed when
+the field loses focus; names differing in case remain separate. The sidebar's
+**Move to folder** action uses the same picker.
+
 Useful shortcuts:
 
 | Shortcut | Action |
