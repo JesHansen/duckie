@@ -201,6 +201,13 @@ after reorder, edit, and deletion.
 
 ## Implementation cautions
 
+Sidebar filter construction (accepted proposal 6) was completed on 18 September
+2026. Empty/whitespace-only queries skip all per-request searchable-text work.
+Nonempty queries are lowercased once and words match the four fields independently,
+without concatenation. Folder grouping and collapsed-folder search behavior remain.
+Formatting, workspace Clippy with warnings denied, and workspace tests passed on
+18 September, including cross-field Unicode matching. No speedup was measured.
+
 Bulk query/header editing (accepted proposal 5) was completed on 18 September 2026.
 Editors retain text on parse failure and apply before save, send, suite, preview,
 duplication, and export. Parsing retains ordering, duplicate-name occurrence flags,

@@ -526,19 +526,24 @@ impl Duckie {
     /// order the manifest stores and therefore the order the user controls.
     fn sidebar_rows(&self) -> Vec<SidebarRow> {
         let search = self.search.to_lowercase();
+        let words: Vec<_> = search.split_whitespace().collect();
         let mut groups: Vec<(&str, Vec<usize>)> = vec![];
         let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for (i, d) in self.drafts.iter().enumerate() {
-            let searchable = format!(
-                "{} {} {} {}",
-                d.request.name, d.request.method, d.request.url, d.request.folder
-            )
-            .to_lowercase();
-            let matches = search
-                .split_whitespace()
-                .all(|word| searchable.contains(word));
-            if !matches {
-                continue;
+            if !words.is_empty() {
+                let fields = [
+                    &d.request.name,
+                    &d.request.method,
+                    &d.request.url,
+                    &d.request.folder,
+                ]
+                .map(|field| field.to_lowercase());
+                if !words
+                    .iter()
+                    .all(|word| fields.iter().any(|field| field.contains(word)))
+                {
+                    continue;
+                }
             }
             let folder = folder_of(&d.request);
             match index.get(folder) {
@@ -2761,6 +2766,25 @@ impl eframe::App for Duckie {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sidebar_filter_matches_words_across_fields_and_unicode() {
+        let (_, mut app) = app_with(&["Users", "Other"]);
+        app.drafts[0].request.name = "Ændring".into();
+        app.drafts[0].request.method = "POST".into();
+        app.drafts[0].request.url = "http://localhost/records".into();
+        app.search = "users ændring post records".into();
+        let rows = app.sidebar_rows();
+        assert!(rows.iter().any(|r| matches!(r, SidebarRow::Request(0))));
+        assert!(!rows.iter().any(|r| matches!(r, SidebarRow::Request(1))));
+        app.search.clear();
+        assert_eq!(
+            app.sidebar_rows()
+                .iter()
+                .filter(|r| matches!(r, SidebarRow::Request(_)))
+                .count(),
+            2
+        );
+    }
     #[test]
     fn row_export_and_duplicate_hydrate_deferred_content() {
         let dir = tempfile::tempdir().unwrap();
