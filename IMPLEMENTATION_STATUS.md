@@ -201,6 +201,14 @@ after reorder, edit, and deletion.
 
 ## Implementation cautions
 
+Sidebar row actions (accepted proposal 4) were completed on 18 September 2026.
+Duplicate, Delete, Move to folder, and redacted POSIX/PowerShell cURL export target
+the clicked row. Duplicate and export hydrate deferred content first, including
+the menu-bar paths. Move offers existing folders, Ungrouped, and trimmed free text;
+case-distinct folders remain distinct. Existing delete confirmation and Save
+semantics remain. Formatting, workspace Clippy with warnings denied, workspace
+tests, and an additional deferred-content regression passed on 18 September.
+
 JSON tree navigation (accepted proposal 3) was completed on 18 September 2026.
 Selection, pointer input, expansion, and filter live with each retained response and
 reset for a new response. Expand/collapse controls retain the 10,000-row virtualized

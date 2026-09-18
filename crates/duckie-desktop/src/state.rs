@@ -422,7 +422,7 @@ pub struct Duckie {
     pub pending: Option<Pending>,
     pub after_save: Option<Pending>,
     pub allow_close: bool,
-    pub delete: Option<usize>,
+    pub delete: Option<String>,
     pub about: bool,
     pub focus_url: bool,
     /// Set by Ctrl+T when the clipboard held no usable text, alongside switching to the Auth
@@ -669,7 +669,61 @@ impl Duckie {
         }
     }
     pub fn copy_curl(&mut self, shell: duckie_model::curl::Shell, credentials: bool) {
-        let mut request = self.drafts[self.selected].request.clone();
+        let id = self.drafts[self.selected].request.id.clone();
+        self.copy_curl_for(&id, shell, credentials);
+    }
+    pub fn duplicate_request(&mut self, id: &str) {
+        if !self.ensure_loaded(id) {
+            return;
+        }
+        let Some(d) = self.drafts.iter().find(|d| d.request.id == id) else {
+            return;
+        };
+        let mut request = d.request.clone();
+        request.id = new_id();
+        request.name.push_str(" copy");
+        request.tests.file.clear();
+        self.drafts.push(Draft {
+            request,
+            source: d.source.clone(),
+            dirty: true,
+            ..Default::default()
+        });
+        self.selected = self.drafts.len() - 1;
+    }
+    pub fn move_request_to_folder(&mut self, id: &str, folder: &str) {
+        if let Some(d) = self.drafts.iter_mut().find(|d| d.request.id == id) {
+            let folder = folder.trim();
+            if d.request.folder != folder {
+                d.request.folder = folder.into();
+                d.dirty = true;
+                d.revision += 1;
+            }
+        }
+    }
+    pub fn delete_request(&mut self, id: &str) {
+        let Some(index) = self.drafts.iter().position(|d| d.request.id == id) else {
+            return;
+        };
+        let d = self.drafts.remove(index);
+        self.responses.remove(&d.request.id);
+        if self.drafts.is_empty() {
+            self.drafts.push(Draft::default());
+        }
+        if index < self.selected {
+            self.selected -= 1;
+        }
+        self.selected = self.selected.min(self.drafts.len() - 1);
+        self.env_dirty = true;
+    }
+    pub fn copy_curl_for(&mut self, id: &str, shell: duckie_model::curl::Shell, credentials: bool) {
+        if !self.ensure_loaded(id) {
+            return;
+        }
+        let Some(d) = self.drafts.iter().find(|d| d.request.id == id) else {
+            return;
+        };
+        let mut request = d.request.clone();
         let snapshot = self.snapshot();
         if let Some(binding) = request.auth.bearer.take() {
             let value = if credentials {
@@ -1276,6 +1330,7 @@ impl Duckie {
         }
     }
     pub fn use_collection(&mut self, c: Collection) {
+        self.delete = None;
         self.drafts = c
             .requests
             .iter()

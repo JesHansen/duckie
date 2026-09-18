@@ -409,7 +409,16 @@ impl Duckie {
                 _ => {}
             }
         }
-        if let Some(index) = self.delete {
+        if self
+            .delete
+            .as_ref()
+            .is_some_and(|id| !self.drafts.iter().any(|d| &d.request.id == id))
+        {
+            self.delete = None;
+        }
+        if let Some(id) = self.delete.clone()
+            && let Some(index) = self.drafts.iter().position(|d| d.request.id == id)
+        {
             let mut choice = 0;
             egui::Window::new("Delete request?")
                 .collapsible(false)
@@ -434,13 +443,7 @@ impl Duckie {
                     });
                 });
             if choice == 1 {
-                let d = self.drafts.remove(index);
-                self.responses.remove(&d.request.id);
-                if self.drafts.is_empty() {
-                    self.drafts.push(Draft::default());
-                }
-                self.selected = self.selected.min(self.drafts.len() - 1);
-                self.env_dirty = true;
+                self.delete_request(&id);
             }
             if choice > 0 {
                 self.delete = None;

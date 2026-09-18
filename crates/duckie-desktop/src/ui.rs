@@ -426,6 +426,35 @@ fn folder_of(request: &RequestDefinition) -> &str {
         folder
     }
 }
+fn folder_picker(ui: &mut egui::Ui, id: egui::Id, folder: &mut String, folders: &[String]) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(if folder.trim().is_empty() {
+                "Ungrouped"
+            } else {
+                folder.as_str()
+            })
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(folder, String::new(), "Ungrouped")
+                    .changed();
+                for name in folders {
+                    changed |= ui.selectable_value(folder, name.clone(), name).changed();
+                }
+            });
+        let response = ui.text_edit_singleline(folder);
+        changed |= response.changed();
+        if response.lost_focus() {
+            let trimmed = folder.trim().to_string();
+            if *folder != trimmed {
+                *folder = trimmed;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
 
 /// Minimum room for the selected request editor. Row-based tabs grow with their contents so the
 /// request/response split cannot hide newly added parameters, headers, or authentication fields.
@@ -703,18 +732,8 @@ impl Duckie {
                     ui.close();
                 }
                 if ui.button("Duplicate request").clicked() {
-                    let d = &self.drafts[self.selected];
-                    let mut r = d.request.clone();
-                    r.id = new_id();
-                    r.name.push_str(" copy");
-                    r.tests.file.clear();
-                    self.drafts.push(Draft {
-                        request: r,
-                        source: d.source.clone(),
-                        dirty: true,
-                        ..Default::default()
-                    });
-                    self.selected = self.drafts.len() - 1;
+                    let id = self.drafts[self.selected].request.id.clone();
+                    self.duplicate_request(&id);
                     ui.close();
                 }
                 ui.separator();
@@ -744,7 +763,7 @@ impl Duckie {
                     ui.close();
                 }
                 if ui.button("Delete request…").clicked() {
-                    self.delete = Some(self.selected);
+                    self.delete = Some(self.drafts[self.selected].request.id.clone());
                     ui.close();
                 }
             });
@@ -870,6 +889,17 @@ impl Duckie {
 
         let mut toggle = None;
         let mut move_by = None;
+        let mut duplicate = None;
+        let mut copy = None;
+        let mut move_folder = None;
+        let folders: Vec<_> = self
+            .drafts
+            .iter()
+            .map(|d| d.request.folder.trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let mut scroll = egui::ScrollArea::vertical().id_salt("requests");
         if focused
             && (direction != 0 || search_field.changed())
@@ -934,6 +964,38 @@ impl Duckie {
                                     d.request.address()
                                 ));
                             response.context_menu(|ui| {
+                                if ui.button("Duplicate request").clicked() {
+                                    duplicate = Some(d.request.id.clone());
+                                    ui.close();
+                                }
+                                if ui.button("Delete request…").clicked() {
+                                    self.delete = Some(d.request.id.clone());
+                                    ui.close();
+                                }
+                                ui.menu_button("Move to folder", |ui| {
+                                    let edit_id = egui::Id::new(("move-folder", &d.request.id));
+                                    let mut folder = ui
+                                        .data(|data| data.get_temp::<String>(edit_id))
+                                        .unwrap_or_else(|| d.request.folder.clone());
+                                    folder_picker(ui, edit_id, &mut folder, &folders);
+                                    ui.data_mut(|data| data.insert_temp(edit_id, folder.clone()));
+                                    if ui.button("Move").clicked() {
+                                        move_folder = Some((d.request.id.clone(), folder));
+                                        ui.close();
+                                    }
+                                });
+                                ui.menu_button("Copy as cURL (redacted)", |ui| {
+                                    for (label, shell) in [
+                                        ("POSIX", duckie_model::curl::Shell::Posix),
+                                        ("PowerShell", duckie_model::curl::Shell::PowerShell),
+                                    ] {
+                                        if ui.button(label).clicked() {
+                                            copy = Some((d.request.id.clone(), shell));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                ui.separator();
                                 if ui.button("Move up").clicked() {
                                     move_by = Some((i, true));
                                     ui.close();
@@ -963,6 +1025,15 @@ impl Duckie {
         }
         if let Some((index, up)) = move_by {
             self.reorder(index, up);
+        }
+        if let Some(id) = duplicate {
+            self.duplicate_request(&id);
+        }
+        if let Some((id, shell)) = copy {
+            self.copy_curl_for(&id, shell, false);
+        }
+        if let Some((id, folder)) = move_folder {
+            self.move_request_to_folder(&id, &folder);
         }
         ui.separator();
         if ui.button("Open collection…").clicked() {
@@ -2642,6 +2713,77 @@ impl eframe::App for Duckie {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn row_export_and_duplicate_hydrate_deferred_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut collection =
+            duckie_storage::Collection::new(dir.path().into(), "rows".into()).unwrap();
+        let request = RequestDefinition {
+            url: "http://localhost/".into(),
+            body: Body::Text {
+                text: "retained body".into(),
+            },
+            ..Default::default()
+        };
+        let id = request.id.clone();
+        collection.requests.push(duckie_storage::StoredRequest::new(
+            request,
+            "// retained tests".into(),
+        ));
+        collection.save().unwrap();
+        let (_, mut app) = app_with(&[""]);
+        app.use_collection(duckie_storage::Collection::open(dir.path()).unwrap());
+        assert!(app.drafts[0].pending);
+        app.copy_curl_for(&id, duckie_model::curl::Shell::Posix, false);
+        assert!(!app.drafts[0].pending);
+        assert_eq!(app.status, "Copied redacted cURL");
+        app.use_collection(duckie_storage::Collection::open(dir.path()).unwrap());
+        app.duplicate_request(&id);
+        assert_eq!(app.drafts[1].source, "// retained tests");
+        assert!(
+            matches!(&app.drafts[1].request.body, Body::Text { text } if text == "retained body")
+        );
+    }
+    #[test]
+    fn pending_delete_keeps_row_identity_after_reorder() {
+        let (_, mut app) = app_with(&["A", "A"]);
+        let id = app.drafts[1].request.id.clone();
+        app.delete = Some(id.clone());
+        app.reorder(1, true);
+        assert_eq!(app.delete.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            app.drafts
+                .iter()
+                .position(|d| Some(&d.request.id) == app.delete.as_ref()),
+            Some(0)
+        );
+        app.delete_request(&id);
+        assert_eq!(app.drafts.len(), 1);
+        assert_ne!(app.drafts[0].request.id, id);
+        assert!(app.env_dirty);
+    }
+    #[test]
+    fn request_actions_target_the_given_identity() {
+        let (_, mut app) = app_with(&["A", "B"]);
+        app.selected = 0;
+        let id = app.drafts[1].request.id.clone();
+        app.drafts[1].source = "// second request".into();
+        app.drafts[1].request.body = Body::Text {
+            text: "second body".into(),
+        };
+        app.move_request_to_folder(&id, " C ");
+        assert_eq!(app.drafts[0].request.folder, "A");
+        assert_eq!(app.drafts[1].request.folder, "C");
+        app.duplicate_request(&id);
+        assert_eq!(app.selected, 2);
+        assert_ne!(app.drafts[2].request.id, id);
+        assert_eq!(app.drafts[2].source, "// second request");
+        assert!(
+            matches!(&app.drafts[2].request.body, Body::Text { text } if text == "second body")
+        );
+        assert!(app.drafts[2].request.tests.file.is_empty());
+        assert!(app.drafts[2].dirty);
+    }
     #[test]
     fn json_filter_reaches_descendants_and_expand_all_stays_bounded() {
         let json = serde_json::json!({"a/b": {"~key": "Needle"}, "other": 2});
