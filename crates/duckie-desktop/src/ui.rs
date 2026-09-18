@@ -300,7 +300,7 @@ pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
                         let focused = ui.memory(|m| m.focused());
                         let enter = ui.input_mut(|input| {
                             (focused == Some(name_id) || focused == Some(value_id))
-                                && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                && crate::shortcuts::consume(input, "row_enter")
                         });
                         let name_focused = ui.memory(|m| m.has_focus(name_id));
                         let name = ui.add_sized(
@@ -600,37 +600,42 @@ impl Duckie {
         self.env_dirty = true;
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if crate::shortcuts::pressed(ctx, "help") {
+            self.open_shortcut_help();
+        }
+        if self.shortcuts_open && crate::shortcuts::pressed(ctx, "escape") {
+            self.shortcuts_open = false;
+            return;
+        }
         // The unsaved-changes dialog handles its own shortcuts and continuation.
         if self.pending.is_some() {
             return;
         }
-        use egui::{Key, KeyboardShortcut as Shortcut, Modifiers};
-        let pressed =
-            |modifiers, key| ctx.input_mut(|i| i.consume_shortcut(&Shortcut::new(modifiers, key)));
-        if pressed(Modifiers::CTRL | Modifiers::SHIFT, Key::O) {
+        let pressed = |id| crate::shortcuts::pressed(ctx, id);
+        if pressed("import") {
             self.request_action(Pending::Import);
         }
-        if pressed(Modifiers::CTRL, Key::O) {
+        if pressed("open") {
             self.request_action(Pending::Open);
         }
-        if pressed(Modifiers::CTRL, Key::N) {
+        if pressed("new") {
             self.new_request();
         }
-        if pressed(Modifiers::CTRL, Key::S) {
+        if pressed("save") {
             self.save_collection(false);
         }
-        if pressed(Modifiers::CTRL | Modifiers::SHIFT, Key::Enter) {
+        if pressed("rerun") {
             self.rerun();
         }
-        if pressed(Modifiers::CTRL, Key::Enter) {
+        if pressed("send") {
             self.send();
         }
-        if pressed(Modifiers::CTRL, Key::L) {
+        if pressed("url") {
             self.focus_url = true;
         }
         // Grab a token, hit Ctrl+T — the common case of getting a fresh bearer token into the
         // active request without switching to the Auth tab and pasting by hand.
-        if pressed(Modifiers::CTRL, Key::T) {
+        if pressed("token") {
             self.request_tab = RequestTab::Auth;
             // Request authentication is a single choice. Pasting the common bearer credential
             // must never leave an API key enabled as a second, hidden authentication scheme.
@@ -678,15 +683,15 @@ impl Duckie {
                 }
             }
         }
-        if pressed(Modifiers::CTRL, Key::B) {
+        if pressed("sidebar") {
             self.prefs.sidebar = !self.prefs.sidebar;
         }
-        if pressed(Modifiers::CTRL, Key::K) {
+        if pressed("search") {
             self.prefs.sidebar = true;
             ctx.memory_mut(|m| m.request_focus(egui::Id::new("request-search")));
         }
         // Ctrl+F belongs to whichever editor holds the caret; the response preview is the default.
-        if pressed(Modifiers::CTRL, Key::F) {
+        if pressed("find") {
             // An already-open editor find keeps Ctrl+F, so pressing it twice does not jump away.
             if (self.editor_focused || self.editor_find.open)
                 && matches!(self.request_tab, RequestTab::Body | RequestTab::Tests)
@@ -698,8 +703,10 @@ impl Duckie {
                 ctx.memory_mut(|m| m.request_focus(egui::Id::new("response-find")));
             }
         }
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            if self.pending.is_some() {
+        if ctx.input(|i| i.key_pressed(crate::shortcuts::binding("escape").chord.logical_key)) {
+            if self.shortcuts_open {
+                self.shortcuts_open = false;
+            } else if self.pending.is_some() {
                 self.pending = None;
             } else if self.env_dialog {
                 self.env_dialog = false;
@@ -848,9 +855,16 @@ impl Duckie {
                     self.apply_theme();
                 }
             });
-            if ui.button("Help").clicked() {
-                self.about = true;
-            }
+            ui.menu_button("Help", |ui| {
+                if ui.button("Keyboard shortcuts · F1").clicked() {
+                    self.open_shortcut_help();
+                    ui.close();
+                }
+                if ui.button("About Duckie").clicked() {
+                    self.about = true;
+                    ui.close();
+                }
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("Edit…")
@@ -878,14 +892,14 @@ impl Duckie {
         let mut open = false;
         if focused {
             ui.input_mut(|i| {
-                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                if crate::shortcuts::consume(i, "search_down") {
                     direction = 1;
                 }
-                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                if crate::shortcuts::consume(i, "search_up") {
                     direction = -1;
                 }
-                open = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-                if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                open = crate::shortcuts::consume(i, "search_open");
+                if crate::shortcuts::consume(i, "search_clear") {
                     self.search.clear();
                     self.search_selected = None;
                 }
@@ -1207,14 +1221,14 @@ impl Duckie {
                 let mut insert = false;
                 let mut dismiss = false;
                 ui.input_mut(|input| {
-                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    if crate::shortcuts::consume(input, "completion_down") {
                         selected = (selected + 1).min(names.len() - 1);
                     }
-                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    if crate::shortcuts::consume(input, "completion_up") {
                         selected = selected.saturating_sub(1);
                     }
-                    insert = input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-                    dismiss = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                    insert = crate::shortcuts::consume(input, "completion_insert");
+                    dismiss = crate::shortcuts::consume(input, "completion_close");
                 });
                 if dismiss {
                     ui.data_mut(|data| data.insert_temp(dismiss_id, address.clone()));
@@ -2134,16 +2148,20 @@ impl Duckie {
                     let tree_id = egui::Id::new(("json-tree", &view.result.run_id));
                     let mut reveal = None;
                     if ui.memory(|m| m.has_focus(tree_id)) {
-                        for key in [
-                            egui::Key::ArrowDown,
-                            egui::Key::ArrowUp,
-                            egui::Key::ArrowLeft,
-                            egui::Key::ArrowRight,
-                            egui::Key::Home,
-                            egui::Key::End,
+                        for command in [
+                            "tree_down",
+                            "tree_up",
+                            "tree_left",
+                            "tree_right",
+                            "tree_home",
+                            "tree_end",
                         ] {
-                            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
-                                reveal = json_tree_key(&mut view.tree, &rows, key);
+                            if ui.input_mut(|i| crate::shortcuts::consume(i, command)) {
+                                reveal = json_tree_key(
+                                    &mut view.tree,
+                                    &rows,
+                                    crate::shortcuts::binding(command).chord.logical_key,
+                                );
                             }
                         }
                     }
@@ -2786,6 +2804,23 @@ impl eframe::App for Duckie {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn f1_opens_searchable_reference_even_during_unsaved_guard() {
+        let (ctx, mut app) = app_with(&[""]);
+        app.pending = Some(Pending::Open);
+        let mut output = ctx.run_ui(key_input(egui::Key::F1), |ui| {
+            app.shortcuts(&ctx);
+            app.dialogs(ui.ctx());
+        });
+        output.textures_delta.clear();
+        assert!(app.shortcuts_open);
+        assert!(app.pending.is_some());
+        app.shortcut_filter = "json arrow".into();
+        let mut output = ctx.run_ui(key_input(egui::Key::Escape), |_| app.shortcuts(&ctx));
+        output.textures_delta.clear();
+        assert!(!app.shortcuts_open);
+        assert!(app.pending.is_some());
+    }
     #[test]
     fn missing_recent_collection_preserves_current_workspace() {
         let dir = tempfile::tempdir().unwrap();

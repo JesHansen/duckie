@@ -489,6 +489,8 @@ pub struct Duckie {
     pub disk_dismissed: Vec<String>,
     pub reveal: bool,
     pub new_env: String,
+    pub shortcuts_open: bool,
+    pub shortcut_filter: String,
 }
 impl Duckie {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -568,6 +570,8 @@ impl Duckie {
             disk_dismissed: vec![],
             reveal: false,
             new_env: String::new(),
+            shortcuts_open: false,
+            shortcut_filter: String::new(),
         };
         #[cfg(feature = "screenshot")]
         if std::env::var_os("DUCKIE_CAPTURE_PATH").is_some() {
@@ -674,6 +678,11 @@ impl Duckie {
     }
     pub fn dirty(&self) -> bool {
         self.env_dirty || self.drafts.iter().any(|d| d.dirty)
+    }
+    pub fn open_shortcut_help(&mut self) {
+        self.shortcuts_open = true;
+        self.ctx
+            .memory_mut(|m| m.request_focus(egui::Id::new("shortcut-search")));
     }
     pub fn background(&self, job: impl FnOnce() -> IoEvent + Send + 'static) {
         let tx = self.io_tx.clone();

@@ -1,0 +1,38 @@
+id	shortcut	action	context
+help	F1	Open searchable keyboard reference	Anywhere
+import	Ctrl+Shift+O	Import an OpenAPI specification	Workspace; unsaved-changes guard applies
+open	Ctrl+O	Open a collection	Workspace; unsaved-changes guard applies
+new	Ctrl+N	Create a request in the current folder/API	Workspace
+save	Ctrl+S	Save the whole collection	Workspace
+rerun	Ctrl+Shift+Enter	Run tests against the retained response	Retained response; no active run
+send	Ctrl+Enter	Send the current request	No active request or suite
+url	Ctrl+L	Focus the URL field	Workspace
+token	Ctrl+T	Paste clipboard as bearer token, or focus token field	Workspace
+sidebar	Ctrl+B	Toggle request sidebar	Workspace
+search	Ctrl+K	Focus request search and show sidebar	Workspace
+find	Ctrl+F	Find in focused Body/Tests editor, otherwise response body	Workspace
+escape	Escape	Close keyboard help, environment/import dialog, or stop active work	Workspace
+search_down	ArrowDown	Select next matching request	Request search focused
+search_up	ArrowUp	Select previous matching request	Request search focused
+search_open	Enter	Open matching request and focus URL without sending	Request search focused
+search_clear	Escape	Clear request search	Request search focused
+completion_down	ArrowDown	Select next template completion	URL template completion open
+completion_up	ArrowUp	Select previous template completion	URL template completion open
+completion_insert	Enter	Insert selected template completion	URL template completion open
+completion_close	Escape	Dismiss template completion	URL template completion open
+row_enter	Enter	Move name to value; append row from populated final value	Query/header/form/variable row focused
+find_next	Enter	Reveal next find match	Find field focused
+find_previous	Shift+Enter	Reveal previous find match	Find field focused
+import_review	Enter	Move focus to Read and review	Import URL field focused; no active I/O
+unsaved_save_enter	Enter	Save and continue	Unsaved-changes dialog
+unsaved_save_alt	Alt+S	Save and continue	Unsaved-changes dialog
+unsaved_save_ctrl	Ctrl+S	Save and continue	Unsaved-changes dialog
+unsaved_discard	Alt+D	Discard and continue	Unsaved-changes dialog
+unsaved_cancel_escape	Escape	Cancel switching/closing	Unsaved-changes dialog
+unsaved_cancel_alt	Alt+C	Cancel switching/closing	Unsaved-changes dialog
+tree_down	ArrowDown	Select next JSON value	JSON tree focused
+tree_up	ArrowUp	Select previous JSON value	JSON tree focused
+tree_left	ArrowLeft	Collapse container or select parent	JSON tree focused; filter keeps ancestors open
+tree_right	ArrowRight	Expand container or select first child	JSON tree focused
+tree_home	Home	Select first visible JSON value	JSON tree focused
+tree_end	End	Select last visible JSON value	JSON tree focused

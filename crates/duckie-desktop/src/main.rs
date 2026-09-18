@@ -4,6 +4,7 @@ mod bench;
 mod bulk;
 mod dialogs;
 mod editor;
+mod shortcuts;
 mod state;
 mod ui;
 

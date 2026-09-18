@@ -82,9 +82,14 @@ pub fn find_bar(ui: &mut Ui, id: &str, find: &mut Find, total: usize) -> bool {
     }
     find.index = find.index.min(total.saturating_sub(1));
     // Enter steps forward and Shift+Enter back, matching the buttons beside the field.
-    if field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-        find.step(total, !ui.input(|i| i.modifiers.shift));
-        reveal = true;
+    if field.has_focus() {
+        if crate::shortcuts::pressed(ui.ctx(), "find_previous") {
+            find.step(total, false);
+            reveal = true;
+        } else if crate::shortcuts::pressed(ui.ctx(), "find_next") {
+            find.step(total, true);
+            reveal = true;
+        }
     }
     let enabled = total > 0;
     if ui

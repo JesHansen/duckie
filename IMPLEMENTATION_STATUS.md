@@ -173,7 +173,12 @@ Regression coverage takes the lock directly from two threads to verify the secon
 
 The first attempt at measuring this showed almost no memory difference, which was a real finding about the *reading* code, not the deferral itself: the attachment pass batched every file's bytes into one `Vec` before any were discarded, so the transient peak barely differed from reading everything eagerly regardless of what got kept afterward. `read_many` now takes a per-file transform applied where each file is read, before its bytes cross back to the caller, so hashing 2,000 attachments during open no longer means holding all 2,000 at once. See [PERFORMANCE.md](PERFORMANCE.md#deferred-bodytest-loading-13-september-2026) for the measured comparison — restore time is unaffected, since the same files are still read and hashed at open either way; only memory changes.
 
-## Resolved: environment and secret lifecycle (18 September 2026)
+## Resolved: quality-of-life review (18 September 2026)
+
+All ten accepted proposals in TO_IMPLEMENT_QOL.md are implemented. Rejected proposals
+remain closed. Each accepted feature was checked and committed before the next began.
+
+### Environment and secret lifecycle
 
 The first accepted proposal in TO_IMPLEMENT_QOL.md is implemented. Environments can
 be renamed, duplicated, and deleted; the final environment cannot be deleted.
@@ -186,7 +191,7 @@ remembered secrets file is rebuilt, including when no credentials remain.
 Validation on 18 September 2026: workspace formatting, Clippy with warnings denied,
 and workspace tests passed, including lifecycle and save/reopen regressions.
 
-## Resolved: suite progress and result navigation (18 September 2026)
+### Suite progress and result navigation
 
 The second accepted proposal in TO_IMPLEMENT_QOL.md is implemented. The shared suite
 runner emits starts and completions while retaining frozen inputs, sequential order,
@@ -199,51 +204,7 @@ Validation on 18 September 2026: formatting, workspace Clippy with warnings deni
 and workspace tests passed, including progress ordering, stop/cancel, and navigation
 after reorder, edit, and deletion.
 
-## Implementation cautions
-
-Recent collections (accepted proposal 9) were completed on 18 September 2026.
-Eight roots persist locally with legacy last-collection migration, Windows path
-deduplication, and recency updates after successful opens/saves. File menu selection
-uses the unsaved-changes guard. Failed opens retain current drafts and recency.
-Formatting, workspace Clippy with warnings denied, workspace tests, and focused
-missing-folder/guard/deduplication regressions passed on 18 September.
-
-Contextual new requests (accepted proposal 8) were completed on 18 September 2026.
-The README defines explicit environment-base inheritance and the concrete-origin
-fallback. New drafts receive fresh IDs and default request content, and are dirty;
-redirect navigation uses the separate fresh-draft path. Formatting, workspace
-Clippy with warnings denied, workspace tests, and the focused inheritance regression
-passed on 18 September, covering origin credential stripping, base templates, and
-fresh redirect behavior.
-
-The editable folder picker (accepted proposal 7) was completed on 18 September
-2026. Settings reuses the Move to folder picker, including existing collection
-folders, explicit Ungrouped, and trimmed free-text creation without case merging.
-Formatting, workspace Clippy with warnings denied, and workspace tests passed on
-18 September; this validation is headless, not an interactive desktop walkthrough.
-
-Sidebar filter construction (accepted proposal 6) was completed on 18 September
-2026. Empty/whitespace-only queries skip all per-request searchable-text work.
-Nonempty queries are lowercased once and words match the four fields independently,
-without concatenation. Folder grouping and collapsed-folder search behavior remain.
-Formatting, workspace Clippy with warnings denied, and workspace tests passed on
-18 September, including cross-field Unicode matching. No speedup was measured.
-
-Bulk query/header editing (accepted proposal 5) was completed on 18 September 2026.
-Editors retain text on parse failure and apply before save, send, suite, preview,
-duplication, and export. Parsing retains ordering, duplicate-name occurrence flags,
-and untouched query provenance; edited query values restore normal templates.
-The README defines the single-line format and whitespace behavior. Formatting,
-workspace Clippy with warnings denied, and workspace tests passed on 18 September,
-including delimiter, duplicate, provenance, and failure-retention regressions.
-
-Sidebar row actions (accepted proposal 4) were completed on 18 September 2026.
-Duplicate, Delete, Move to folder, and redacted POSIX/PowerShell cURL export target
-the clicked row. Duplicate and export hydrate deferred content first, including
-the menu-bar paths. Move offers existing folders, Ungrouped, and trimmed free text;
-case-distinct folders remain distinct. Existing delete confirmation and Save
-semantics remain. Formatting, workspace Clippy with warnings denied, workspace
-tests, and an additional deferred-content regression passed on 18 September.
+### Other accepted improvements
 
 JSON tree navigation (accepted proposal 3) was completed on 18 September 2026.
 Selection, pointer input, expansion, and filter live with each retained response and
@@ -253,6 +214,62 @@ the bounded parsed tree and keeps matching ancestors reachable. A focused tree
 supports arrows and Home/End. Formatting, workspace Clippy with warnings denied,
 and workspace tests passed on 18 September, including escaped-pointer filtering,
 late matches, row caps, and keyboard expansion/movement regressions.
+
+Sidebar row actions (accepted proposal 4) were completed on 18 September 2026.
+Duplicate, Delete, Move to folder, and redacted POSIX/PowerShell cURL export target
+the clicked row. Duplicate and export hydrate deferred content first, including
+the menu-bar paths. Move offers existing folders, Ungrouped, and trimmed free text;
+case-distinct folders remain distinct. Existing delete confirmation and Save
+semantics remain. Formatting, workspace Clippy with warnings denied, workspace
+tests, and an additional deferred-content regression passed on 18 September.
+
+Bulk query/header editing (accepted proposal 5) was completed on 18 September 2026.
+Editors retain text on parse failure and apply before save, send, suite, preview,
+duplication, and export. Parsing retains ordering, duplicate-name occurrence flags,
+and untouched query provenance; edited query values restore normal templates.
+The README defines the single-line format and whitespace behavior. Formatting,
+workspace Clippy with warnings denied, and workspace tests passed on 18 September,
+including delimiter, duplicate, provenance, and failure-retention regressions.
+
+Sidebar filter construction (accepted proposal 6) was completed on 18 September
+2026. Empty/whitespace-only queries skip all per-request searchable-text work.
+Nonempty queries are lowercased once and words match the four fields independently,
+without concatenation. Folder grouping and collapsed-folder search behavior remain.
+Formatting, workspace Clippy with warnings denied, and workspace tests passed on
+18 September, including cross-field Unicode matching. No speedup was measured.
+
+The editable folder picker (accepted proposal 7) was completed on 18 September
+2026. Settings reuses the Move to folder picker, including existing collection
+folders, explicit Ungrouped, and trimmed free-text creation without case merging.
+Formatting, workspace Clippy with warnings denied, and workspace tests passed on
+18 September; this validation is headless, not an interactive desktop walkthrough.
+
+Contextual new requests (accepted proposal 8) were completed on 18 September 2026.
+The README defines explicit environment-base inheritance and the concrete-origin
+fallback. New drafts receive fresh IDs and default request content, and are dirty;
+redirect navigation uses the separate fresh-draft path. Formatting, workspace
+Clippy with warnings denied, workspace tests, and the focused inheritance regression
+passed on 18 September, covering origin credential stripping, base templates, and
+fresh redirect behavior.
+
+Recent collections (accepted proposal 9) were completed on 18 September 2026.
+Eight roots persist locally with legacy last-collection migration, Windows path
+deduplication, and recency updates after successful opens/saves. File menu selection
+uses the unsaved-changes guard. Failed opens retain current drafts and recency.
+Formatting, workspace Clippy with warnings denied, workspace tests, and focused
+missing-folder/guard/deduplication regressions passed on 18 September.
+
+Keyboard reference (accepted proposal 10) was completed on 18 September 2026.
+The TSV table supplies global and context-specific bindings, searchable F1 help,
+and the generated README rows. README generation is a development step with a
+check mode, and a workspace regression detects reference drift. F1 focuses search,
+works during the unsaved-changes guard, and Escape closes help before that guard.
+Formatting, workspace Clippy with warnings denied, workspace tests, and README
+generation check passed on 18 September, including existing context-keyboard
+regressions and new reference/F1 regressions. This is headless validation; no
+interactive desktop walkthrough or performance speedup is claimed.
+
+## Implementation cautions
 
 - **Save covers the collection.** All dirty drafts save together. Reordering changes the manifest and must mark it dirty even if no request content changed. Deletion removes the manifest entry on Save but retains unreferenced files. Body and test content loads lazily, per request, on first selection or Send; see below.
 - **A `pending` draft's body/source are placeholders, not empty content.** Any new code path that reads `Draft.request.body` or `Draft.source` — not just the ones that already do — must either go through a draft that is not `pending`, or call `Duckie::ensure_loaded` first. `save_collection`'s pre-save hydration loop is the backstop, but do not add a second way to reach `Collection::save` that skips it.

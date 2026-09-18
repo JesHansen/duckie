@@ -83,16 +83,49 @@ because Duckie cannot infer an API base path. Other URLs start empty. New reques
 keep default name/method and do not copy authentication, query values, headers,
 bodies, or tests. Opening a response Location still creates a fresh GET request.
 
-Useful shortcuts:
+Press **F1** for the searchable keyboard reference, also available under Help.
 
-| Shortcut | Action |
-| --- | --- |
-| **Ctrl+Enter** | Send the current request |
-| **Ctrl+Shift+Enter** | Run tests against the retained response |
-| **Ctrl+S** | Save the whole collection |
-| **Ctrl+Shift+O** | Import an OpenAPI specification |
-| **Ctrl+T** | Paste the clipboard into the bearer token field |
-| **Ctrl+F** | Find in the focused editor or response body |
+<!-- shortcuts:start -->
+| Shortcut | Action | Context |
+| --- | --- | --- |
+| **F1** | Open searchable keyboard reference | Anywhere |
+| **Ctrl+Shift+O** | Import an OpenAPI specification | Workspace; unsaved-changes guard applies |
+| **Ctrl+O** | Open a collection | Workspace; unsaved-changes guard applies |
+| **Ctrl+N** | Create a request in the current folder/API | Workspace |
+| **Ctrl+S** | Save the whole collection | Workspace |
+| **Ctrl+Shift+Enter** | Run tests against the retained response | Retained response; no active run |
+| **Ctrl+Enter** | Send the current request | No active request or suite |
+| **Ctrl+L** | Focus the URL field | Workspace |
+| **Ctrl+T** | Paste clipboard as bearer token, or focus token field | Workspace |
+| **Ctrl+B** | Toggle request sidebar | Workspace |
+| **Ctrl+K** | Focus request search and show sidebar | Workspace |
+| **Ctrl+F** | Find in focused Body/Tests editor, otherwise response body | Workspace |
+| **Escape** | Close keyboard help, environment/import dialog, or stop active work | Workspace |
+| **ArrowDown** | Select next matching request | Request search focused |
+| **ArrowUp** | Select previous matching request | Request search focused |
+| **Enter** | Open matching request and focus URL without sending | Request search focused |
+| **Escape** | Clear request search | Request search focused |
+| **ArrowDown** | Select next template completion | URL template completion open |
+| **ArrowUp** | Select previous template completion | URL template completion open |
+| **Enter** | Insert selected template completion | URL template completion open |
+| **Escape** | Dismiss template completion | URL template completion open |
+| **Enter** | Move name to value; append row from populated final value | Query/header/form/variable row focused |
+| **Enter** | Reveal next find match | Find field focused |
+| **Shift+Enter** | Reveal previous find match | Find field focused |
+| **Enter** | Move focus to Read and review | Import URL field focused; no active I/O |
+| **Enter** | Save and continue | Unsaved-changes dialog |
+| **Alt+S** | Save and continue | Unsaved-changes dialog |
+| **Ctrl+S** | Save and continue | Unsaved-changes dialog |
+| **Alt+D** | Discard and continue | Unsaved-changes dialog |
+| **Escape** | Cancel switching/closing | Unsaved-changes dialog |
+| **Alt+C** | Cancel switching/closing | Unsaved-changes dialog |
+| **ArrowDown** | Select next JSON value | JSON tree focused |
+| **ArrowUp** | Select previous JSON value | JSON tree focused |
+| **ArrowLeft** | Collapse container or select parent | JSON tree focused; filter keeps ancestors open |
+| **ArrowRight** | Expand container or select first child | JSON tree focused |
+| **Home** | Select first visible JSON value | JSON tree focused |
+| **End** | Select last visible JSON value | JSON tree focused |
+<!-- shortcuts:end -->
 
 Sending does not save automatically. Duckie retains dirty drafts, and **Ctrl+S** saves the entire collection together.
 
@@ -171,6 +204,12 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+Shortcut bindings and reference text live in
+`crates/duckie-desktop/src/shortcuts.tsv`. After changing that table, run
+`python scripts/generate-shortcuts.py` to update this README; use `--check` to
+verify it without writing. Workspace tests also check that the generated reference
+matches the binding table.
 
 Node.js is needed for the local development server and the two end-to-end tests that use it. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for current decisions and known defects, and [PERFORMANCE.md](PERFORMANCE.md) for reproducible benchmark procedures and measurements. [ARCHITECTURE.md](ARCHITECTURE.md) and [UI_DESIGN.md](UI_DESIGN.md) are historical design proposals rather than an introduction to the current product.
 

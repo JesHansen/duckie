@@ -307,6 +307,25 @@ async fn acquire_remote(
 
 impl Duckie {
     pub fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.shortcuts_open {
+            let mut open = true;
+            egui::Window::new("Keyboard shortcuts").open(&mut open).default_size([820.0, 520.0]).show(ctx, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.shortcut_filter).id(egui::Id::new("shortcut-search")).hint_text("Search shortcut, action, or context…").desired_width(f32::INFINITY));
+                ui.weak("Context describes when each command applies. Workspace commands pause while the unsaved-changes dialog is open.");
+                let query = self.shortcut_filter.to_lowercase();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Grid::new("keyboard-reference").striped(true).show(ui, |ui| {
+                        ui.strong("Shortcut"); ui.strong("Action"); ui.strong("Context"); ui.end_row();
+                        for b in crate::shortcuts::bindings() {
+                            let text = format!("{} {} {}", b.label, b.action, b.context).to_lowercase();
+                            if !query.split_whitespace().all(|word| text.contains(word)) { continue; }
+                            ui.monospace(b.label); ui.label(b.action); ui.label(b.context); ui.end_row();
+                        }
+                    });
+                });
+            });
+            self.shortcuts_open = open;
+        }
         if self.suite.open {
             self.suite_dialog(ctx);
         }
@@ -360,25 +379,19 @@ impl Duckie {
             self.import_dialog(ctx);
         }
         if let Some(action) = self.pending.clone() {
-            use egui::{Key, KeyboardShortcut, Modifiers};
-            let pressed = |modifiers, key| {
-                ctx.input_mut(|input| {
-                    input.consume_shortcut(&KeyboardShortcut::new(modifiers, key))
-                })
+            let pressed = |id| crate::shortcuts::pressed(ctx, id);
+            let mut choice = if pressed("unsaved_cancel_escape") || pressed("unsaved_cancel_alt") {
+                3
+            } else if pressed("unsaved_discard") {
+                2
+            } else if pressed("unsaved_save_enter")
+                || pressed("unsaved_save_alt")
+                || pressed("unsaved_save_ctrl")
+            {
+                1
+            } else {
+                0
             };
-            let mut choice =
-                if pressed(Modifiers::NONE, Key::Escape) || pressed(Modifiers::ALT, Key::C) {
-                    3
-                } else if pressed(Modifiers::ALT, Key::D) {
-                    2
-                } else if pressed(Modifiers::NONE, Key::Enter)
-                    || pressed(Modifiers::ALT, Key::S)
-                    || pressed(Modifiers::CTRL, Key::S)
-                {
-                    1
-                } else {
-                    0
-                };
             egui::Window::new("Unsaved changes")
                 .collapsible(false)
                 .resizable(false)
@@ -455,7 +468,7 @@ impl Duckie {
         if self.about {
             egui::Window::new("About Duckie").open(&mut self.about).resizable(false).show(ctx,|ui|{
             ui.heading("Duckie 1.0.0");ui.label("A small, local HTTP workbench for Windows.");ui.separator();
-            ui.label("Ctrl+N   New request\nCtrl+O   Open collection\nCtrl+S   Save collection\nCtrl+Enter   Send request\nCtrl+Shift+Enter   Rerun tests without HTTP\nCtrl+L   Focus URL\nCtrl+T   Paste bearer token\nCtrl+K   Find requests\nCtrl+B   Toggle sidebar\nEscape   Close dialog or stop work");
+            if ui.button("Keyboard shortcuts · F1").clicked() { self.shortcuts_open = true; ctx.memory_mut(|m| m.request_focus(egui::Id::new("shortcut-search"))); }
             ui.separator();ui.label("See README.md and IMPLEMENTATION_STATUS.md for coverage and release gates.");
         });
         }
@@ -845,7 +858,7 @@ impl Duckie {
                 ui.label("Swagger 2.0 / OpenAPI 3.0 / 3.1 / 3.2 · JSON or YAML");
                 ui.horizontal(|ui| {
                     let field = ui.add(egui::TextEdit::singleline(&mut import.source).desired_width(650.0).hint_text(if import.url_mode { "https://api.example.com/openapi.yaml" } else { "Choose an OpenAPI JSON or YAML file" }));
-                    focus_read = import.url_mode && field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    focus_read = import.url_mode && field.lost_focus() && crate::shortcuts::pressed(ctx, "import_review");
                     if import.focus_source {
                         if import.url_mode { field.request_focus(); }
                         import.focus_source = false;
