@@ -731,6 +731,18 @@ impl Duckie {
                     self.request_action(Pending::Open);
                     ui.close();
                 }
+                ui.menu_button("Recent collections", |ui| {
+                    let recent = self.prefs.recent_collections.clone();
+                    if recent.is_empty() {
+                        ui.weak("No recent collections");
+                    }
+                    for path in recent {
+                        if ui.button(path.display().to_string()).clicked() {
+                            self.request_action(Pending::OpenRecent(path));
+                            ui.close();
+                        }
+                    }
+                });
                 if ui.button("Import OpenAPI…    Ctrl+Shift+O").clicked() {
                     self.request_action(Pending::Import);
                     ui.close();
@@ -2774,6 +2786,54 @@ impl eframe::App for Duckie {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_recent_collection_preserves_current_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, mut app) = app_with(&["Current"]);
+        let id = app.drafts[0].request.id.clone();
+        app.prefs.record_collection(dir.path().join("current"));
+        let recent = app.prefs.recent_collections.clone();
+        app.perform(Pending::OpenRecent(dir.path().join("missing")));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.io_busy && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.poll();
+        }
+        assert!(!app.io_busy);
+        assert!(app.status.contains("Could not open"));
+        assert_eq!(app.drafts[0].request.id, id);
+        assert_eq!(app.drafts[0].request.folder, "Current");
+        assert_eq!(app.prefs.recent_collections, recent);
+    }
+    #[test]
+    fn recent_collections_are_bounded_deduplicated_and_guarded() {
+        let (_, mut app) = app_with(&[""]);
+        app.prefs.recent_collections.clear();
+        for i in 0..10 {
+            app.prefs
+                .record_collection(std::path::PathBuf::from(format!("D:/duckie-recent-{i}")));
+        }
+        assert_eq!(app.prefs.recent_collections.len(), 8);
+        app.prefs
+            .record_collection(std::path::PathBuf::from("d:\\DUCKIE-RECENT-5\\"));
+        assert_eq!(app.prefs.recent_collections.len(), 8);
+        assert_eq!(
+            app.prefs
+                .recent_collections
+                .iter()
+                .filter(|p| p.to_string_lossy().to_lowercase().contains("recent-5"))
+                .count(),
+            1
+        );
+        app.drafts[0].dirty = true;
+        let missing = std::path::PathBuf::from("D:/missing-duckie-recent");
+        app.request_action(Pending::OpenRecent(missing.clone()));
+        assert!(matches!(&app.pending, Some(Pending::OpenRecent(p)) if p == &missing));
+        assert!(!app.io_busy);
+        let json = serde_json::to_string(&app.prefs).unwrap();
+        let restored: Preferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.recent_collections, app.prefs.recent_collections);
+    }
     #[test]
     fn new_request_inherits_only_folder_and_url_base() {
         let (_, mut app) = app_with(&["API"]);

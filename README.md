@@ -106,6 +106,10 @@ New requests allow 10 minutes by default, including connection setup and respons
 
 A collection is a normal folder containing a `duckie.json` manifest and separate files for requests, bodies, tests, and environments. That makes collections suitable for ordinary source control and collaboration.
 
+**File → Recent collections** lists the last eight successfully opened or saved
+collection roots. Switching uses the unsaved-changes prompt; a missing collection
+leaves your current workspace intact. The list stays in local preferences.
+
 Credentials are session-only unless you select **Remember in secrets file**. Remembered values go into `.duckie/secrets.json`, while shareable request definitions contain only secret-key bindings. The generated `.gitignore` excludes `/.duckie/`; do not share that directory. **Environments → Export secrets** deliberately creates a separate plaintext file, so handle that export accordingly.
 
 Duckie detects external edits and prevents an older in-app copy from silently overwriting them. It also preserves fields it does not recognize when saving compatible collection files.

@@ -201,6 +201,13 @@ after reorder, edit, and deletion.
 
 ## Implementation cautions
 
+Recent collections (accepted proposal 9) were completed on 18 September 2026.
+Eight roots persist locally with legacy last-collection migration, Windows path
+deduplication, and recency updates after successful opens/saves. File menu selection
+uses the unsaved-changes guard. Failed opens retain current drafts and recency.
+Formatting, workspace Clippy with warnings denied, workspace tests, and focused
+missing-folder/guard/deduplication regressions passed on 18 September.
+
 Contextual new requests (accepted proposal 8) were completed on 18 September 2026.
 The README defines explicit environment-base inheritance and the concrete-origin
 fallback. New drafts receive fresh IDs and default request content, and are dirty;

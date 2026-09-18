@@ -314,6 +314,8 @@ pub enum IoEvent {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Preferences {
     pub last_collection: Option<PathBuf>,
+    #[serde(default)]
+    pub recent_collections: Vec<PathBuf>,
     pub sidebar: bool,
     pub appearance: u8,
     /// Folder names the user has collapsed in the sidebar.
@@ -333,9 +335,46 @@ pub struct Preferences {
     #[serde(default)]
     pub request_height: Option<f32>,
 }
-#[derive(Clone, Copy)]
+impl Preferences {
+    pub fn record_collection(&mut self, path: PathBuf) {
+        let key = collection_path_key(&path);
+        self.recent_collections
+            .retain(|p| collection_path_key(p) != key);
+        self.recent_collections.insert(0, path.clone());
+        self.recent_collections.truncate(8);
+        self.last_collection = Some(path);
+    }
+}
+fn collection_path_key(path: &std::path::Path) -> String {
+    let absolute = path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        }
+    });
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let text = normalized.to_string_lossy().replace('/', "\\");
+    let text = if let Some(unc) = text.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{unc}")
+    } else {
+        text.strip_prefix("\\\\?\\").unwrap_or(&text).to_string()
+    };
+    text.trim_end_matches('\\').to_lowercase()
+}
+#[derive(Clone)]
 pub enum Pending {
     Open,
+    OpenRecent(PathBuf),
     NewCollection,
     Import,
     UpdateFromSpec,
@@ -453,13 +492,18 @@ pub struct Duckie {
 }
 impl Duckie {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let prefs = cc
+        let mut prefs = cc
             .storage
             .and_then(|s| eframe::get_value(s, "duckie-preferences"))
             .unwrap_or(Preferences {
                 sidebar: true,
                 ..Default::default()
             });
+        if prefs.recent_collections.is_empty()
+            && let Some(path) = prefs.last_collection.clone()
+        {
+            prefs.record_collection(path);
+        }
         let ctx = cc.egui_ctx.clone();
         let wake = ctx.clone();
         let (service, events) = ExecutionService::new(move || wake.request_repaint())
@@ -1236,7 +1280,7 @@ impl Duckie {
                                 d.dirty = false;
                             }
                             self.env_dirty = false;
-                            self.prefs.last_collection = Some(c.root.clone());
+                            self.prefs.record_collection(c.root.clone());
                             self.status = format!("Saved to {}", c.root.display());
                             self.collection = Some(c);
                             self.disk_changes.clear();
@@ -1411,7 +1455,7 @@ impl Duckie {
         }
         self.env_dirty = false;
         self.responses.clear();
-        self.prefs.last_collection = Some(c.root.clone());
+        self.prefs.record_collection(c.root.clone());
         self.status = format!("Opened {}", c.manifest.name);
         self.collection = Some(c);
         self.focus_url = true;
@@ -1620,6 +1664,7 @@ impl Duckie {
     }
     pub fn perform(&mut self, action: Pending) {
         match action {
+            Pending::OpenRecent(path) => self.open_path(path),
             Pending::Open => {
                 if let Some(path) = rfd::FileDialog::new()
                     .set_title("Open Duckie collection folder")

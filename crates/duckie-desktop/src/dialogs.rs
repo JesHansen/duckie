@@ -359,7 +359,7 @@ impl Duckie {
         if self.import.is_some() {
             self.import_dialog(ctx);
         }
-        if let Some(action) = self.pending {
+        if let Some(action) = self.pending.clone() {
             use egui::{Key, KeyboardShortcut, Modifiers};
             let pressed = |modifiers, key| {
                 ctx.input_mut(|input| {
