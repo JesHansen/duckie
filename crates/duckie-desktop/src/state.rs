@@ -200,6 +200,8 @@ pub enum ResponseTab {
 }
 #[derive(Default)]
 pub struct Draft {
+    pub query_bulk: Option<crate::bulk::BulkEdit>,
+    pub headers_bulk: Option<crate::bulk::BulkEdit>,
     pub request: RequestDefinition,
     /// Editable request-variable rows. Unlike the serialized `BTreeMap`, this keeps a newly
     /// appended blank row in place while its name is being entered.
@@ -213,6 +215,13 @@ pub struct Draft {
     /// frame calls for the selected draft and which `save_collection` calls for every draft
     /// before it writes anything, so a request is never saved with placeholder content.
     pub pending: bool,
+}
+impl Draft {
+    pub fn apply_bulk(&mut self) -> bool {
+        let query = crate::bulk::apply(&mut self.query_bulk, &mut self.request.query, '=');
+        let headers = crate::bulk::apply(&mut self.headers_bulk, &mut self.request.headers, ':');
+        query && headers
+    }
 }
 /// Whole-body search results. Offsets are absolute byte positions in the response body, so they
 /// stay meaningful across page changes, unlike the per-page hits the editor highlights.
@@ -673,6 +682,9 @@ impl Duckie {
         self.copy_curl_for(&id, shell, credentials);
     }
     pub fn duplicate_request(&mut self, id: &str) {
+        if !self.apply_bulk_for(id) {
+            return;
+        }
         if !self.ensure_loaded(id) {
             return;
         }
@@ -717,6 +729,9 @@ impl Duckie {
         self.env_dirty = true;
     }
     pub fn copy_curl_for(&mut self, id: &str, shell: duckie_model::curl::Shell, credentials: bool) {
+        if !self.apply_bulk_for(id) {
+            return;
+        }
         if !self.ensure_loaded(id) {
             return;
         }
@@ -765,6 +780,10 @@ impl Duckie {
         }
     }
     pub fn refresh_request_preview(&mut self) {
+        if !self.drafts[self.selected].apply_bulk() {
+            self.status = "Fix bulk edit errors before previewing.".into();
+            return;
+        }
         let d = &self.drafts[self.selected];
         self.request_preview = Some(
             preview(
@@ -793,6 +812,9 @@ impl Duckie {
             .map(|d| d.request.id.clone())
             .collect();
         for id in &ids {
+            if !self.apply_bulk_for(id) {
+                return;
+            }
             self.ensure_loaded(id);
             if self
                 .drafts
@@ -890,6 +912,10 @@ impl Duckie {
         d.error.clear();
     }
     pub fn send(&mut self) {
+        if !self.drafts[self.selected].apply_bulk() {
+            self.status = "Fix bulk edit errors before sending.".into();
+            return;
+        }
         if self.active.is_some() || self.service.busy() || self.suite.running {
             return;
         }
@@ -1335,6 +1361,8 @@ impl Duckie {
             .requests
             .iter()
             .map(|r| Draft {
+                query_bulk: None,
+                headers_bulk: None,
                 request: r.definition.clone(),
                 variable_rows: r
                     .definition
@@ -1425,6 +1453,10 @@ impl Duckie {
         if self.io_busy {
             return;
         }
+        if self.drafts.iter_mut().any(|d| !d.apply_bulk()) {
+            self.status = "Fix bulk edit errors before saving; nothing was written.".into();
+            return;
+        }
         for id in self
             .drafts
             .iter()
@@ -1488,6 +1520,15 @@ impl Duckie {
         self.io_busy = true;
         self.status = "Saving collection…".into();
         self.background(move || IoEvent::Saved(collection.save().map(|_| collection)));
+    }
+    fn apply_bulk_for(&mut self, id: &str) -> bool {
+        if let Some(d) = self.drafts.iter_mut().find(|d| d.request.id == id)
+            && !d.apply_bulk()
+        {
+            self.status = "Fix bulk edit errors before using this request.".into();
+            return false;
+        }
+        true
     }
     pub fn name_environment(&mut self, duplicate: bool) {
         let name = self.new_env.trim().to_string();

@@ -63,6 +63,13 @@ Then open the `examples/local-api` collection in Duckie. It exercises echo, erro
 
 On first launch, paste an HTTP or HTTPS URL and press **Ctrl+Enter** to send it. Use the request tabs to edit parameters, authentication, headers, the body, tests, and transport settings.
 
+Query parameters and headers offer **Bulk edit**: enter `name=value` or `Name: value`
+per line. The first delimiter splits the line; blank lines are ignored. Duplicate
+names retain their enabled flags by occurrence. Header names are trimmed and one
+space after `:` is removed; query text and templates are preserved. Values must be
+single-line; existing multiline rows stay in the row editor. Apply returns to rows.
+Malformed text is kept and must be fixed before saving, sending, or exporting.
+
 Useful shortcuts:
 
 | Shortcut | Action |

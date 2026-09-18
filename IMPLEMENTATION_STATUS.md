@@ -201,6 +201,14 @@ after reorder, edit, and deletion.
 
 ## Implementation cautions
 
+Bulk query/header editing (accepted proposal 5) was completed on 18 September 2026.
+Editors retain text on parse failure and apply before save, send, suite, preview,
+duplication, and export. Parsing retains ordering, duplicate-name occurrence flags,
+and untouched query provenance; edited query values restore normal templates.
+The README defines the single-line format and whitespace behavior. Formatting,
+workspace Clippy with warnings denied, and workspace tests passed on 18 September,
+including delimiter, duplicate, provenance, and failure-retention regressions.
+
 Sidebar row actions (accepted proposal 4) were completed on 18 September 2026.
 Duplicate, Delete, Move to folder, and redacted POSIX/PowerShell cURL export target
 the clicked row. Duplicate and export hydrate deferred content first, including

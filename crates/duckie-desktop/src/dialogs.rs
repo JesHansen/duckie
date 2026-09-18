@@ -1149,6 +1149,8 @@ impl Duckie {
                 .map(|op| {
                     let request = op.finish();
                     Draft {
+                        query_bulk: None,
+                        headers_bulk: None,
                         variable_rows: request
                             .variables
                             .iter()
@@ -1234,6 +1236,8 @@ impl Duckie {
                         .map(|(name, value)| Row::new(name, value))
                         .collect();
                     self.drafts.push(Draft {
+                        query_bulk: None,
+                        headers_bulk: None,
                         request,
                         variable_rows,
                         source: String::new(),

@@ -227,6 +227,50 @@ fn json_tree_key(tree: &mut JsonTreeState, rows: &[JsonRow<'_>], key: egui::Key)
     tree.selected = rows[next].pointer.clone();
     Some(next)
 }
+fn bulk_rows(
+    ui: &mut egui::Ui,
+    id: &str,
+    rows: &mut Vec<Row>,
+    editor: &mut Option<crate::bulk::BulkEdit>,
+    delimiter: char,
+) -> bool {
+    let mut changed = false;
+    if editor.is_some() {
+        if ui.button("Apply bulk edit / return to rows").clicked() {
+            changed |= crate::bulk::apply(editor, rows, delimiter);
+        }
+        if let Some(bulk) = editor {
+            ui.weak(if delimiter == '=' {
+                "name=value per line; split at first '='. Blank lines ignored."
+            } else {
+                "Name: value per line; split at first ':'. Blank lines ignored."
+            });
+            ui.weak("Values are single-line; backslashes and templates stay literal text. Enabled flags are matched by occurrence.");
+            changed |= ui
+                .add(
+                    egui::TextEdit::multiline(&mut bulk.text)
+                        .id_salt(id)
+                        .desired_rows(6)
+                        .desired_width(f32::INFINITY)
+                        .code_editor(),
+                )
+                .changed();
+            if !bulk.error.is_empty() {
+                ui.colored_label(warning(ui), &bulk.error);
+            }
+            return changed;
+        }
+    } else {
+        let supported = rows
+            .iter()
+            .all(|r| !r.name.contains(['\r', '\n', delimiter]) && !r.value.contains(['\r', '\n']));
+        if ui.add_enabled(supported, egui::Button::new("Bulk edit")).on_disabled_hover_text("Bulk edit needs single-line names/values and names without the delimiter. Edit these rows individually.").clicked() {
+            *editor = Some(crate::bulk::BulkEdit::new(rows, delimiter));
+            return false;
+        }
+    }
+    changed | self::rows(ui, id, rows)
+}
 pub fn rows(ui: &mut egui::Ui, id: &str, rows: &mut Vec<Row>) -> bool {
     let mut changed = false;
     let mut remove = None;
@@ -1304,7 +1348,8 @@ impl Duckie {
         match self.request_tab {
             RequestTab::Params => {
                 ui.label(RichText::new("Query parameters").strong());
-                changed |= rows(ui, "query", &mut self.drafts[self.selected].request.query);
+                let d = &mut self.drafts[self.selected];
+                changed |= bulk_rows(ui, "query", &mut d.request.query, &mut d.query_bulk, '=');
                 ui.add_space(8.0);
                 ui.separator();
                 ui.label(RichText::new("Template variables").strong());
@@ -1314,10 +1359,13 @@ impl Duckie {
                 changed |= request_variables(ui, "request-vars", &mut self.drafts[self.selected]);
             }
             RequestTab::Headers => {
-                changed |= rows(
+                let d = &mut self.drafts[self.selected];
+                changed |= bulk_rows(
                     ui,
                     "headers",
-                    &mut self.drafts[self.selected].request.headers,
+                    &mut d.request.headers,
+                    &mut d.headers_bulk,
+                    ':',
                 );
                 ui.add_space(8.0);
                 ui.weak("Authentication and body headers are added when you send. Duplicate manual auth headers block Send.");
