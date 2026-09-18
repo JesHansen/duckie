@@ -2444,6 +2444,42 @@ impl eframe::App for Duckie {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn environment_lifecycle_keeps_credentials_scoped() {
+        let (_, mut app) = app_with(&[""]);
+        app.envs = vec![duckie_model::Environment {
+            name: "dev".into(),
+            ..Default::default()
+        }];
+        app.env_index = 0;
+        app.secrets.clear();
+        app.remember.clear();
+        app.secrets.insert(
+            "dev".into(),
+            duckie_model::Values::from([("token".into(), "private".into())]),
+        );
+        app.remember.insert(("dev".into(), "token".into()));
+        app.new_env = "copy".into();
+        app.name_environment(true);
+        assert!(!app.secrets.contains_key("copy"));
+        app.delete_environment();
+        app.secrets.insert(
+            "renamed".into(),
+            duckie_model::Values::from([("orphan".into(), "old import".into())]),
+        );
+        app.remember.insert(("renamed".into(), "orphan".into()));
+        app.new_env = "renamed".into();
+        app.name_environment(false);
+        assert!(!app.secrets.contains_key("dev"));
+        assert!(!app.secrets["renamed"].contains_key("orphan"));
+        assert!(app.remember.contains(&("renamed".into(), "token".into())));
+        app.remove_secret("renamed", "token");
+        assert!(app.secrets["renamed"].is_empty());
+        assert!(app.remember.is_empty());
+        app.delete_environment();
+        assert_eq!(app.envs.len(), 1);
+        assert_eq!(app.env_index, 0);
+    }
     use super::*;
     use eframe::App;
     #[test]

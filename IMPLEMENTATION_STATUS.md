@@ -173,6 +173,19 @@ Regression coverage takes the lock directly from two threads to verify the secon
 
 The first attempt at measuring this showed almost no memory difference, which was a real finding about the *reading* code, not the deferral itself: the attachment pass batched every file's bytes into one `Vec` before any were discarded, so the transient peak barely differed from reading everything eagerly regardless of what got kept afterward. `read_many` now takes a per-file transform applied where each file is read, before its bytes cross back to the caller, so hashing 2,000 attachments during open no longer means holding all 2,000 at once. See [PERFORMANCE.md](PERFORMANCE.md#deferred-bodytest-loading-13-september-2026) for the measured comparison — restore time is unaffected, since the same files are still read and hashed at open either way; only memory changes.
 
+## Resolved: environment and secret lifecycle (18 September 2026)
+
+The first accepted proposal in TO_IMPLEMENT_QOL.md is implemented. Environments can
+be renamed, duplicated, and deleted; the final environment cannot be deleted.
+Duplication copies variables and metadata without credentials. Rename moves session
+secrets and remembered flags, and delete removes them. Secret rows offer Remove,
+which clears session and remembered state. These changes use collection Save;
+obsolete environment files are removed through the recoverable transaction and the
+remembered secrets file is rebuilt, including when no credentials remain.
+
+Validation on 18 September 2026: workspace formatting, Clippy with warnings denied,
+and workspace tests passed, including lifecycle and save/reopen regressions.
+
 ## Implementation cautions
 
 - **Save covers the collection.** All dirty drafts save together. Reordering changes the manifest and must mark it dirty even if no request content changed. Deletion removes the manifest entry on Save but retains unreferenced files. Body and test content loads lazily, per request, on first selection or Send; see below.

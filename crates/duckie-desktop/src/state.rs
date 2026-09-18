@@ -1342,6 +1342,7 @@ impl Duckie {
             .map(|d| StoredRequest::new(d.request.clone(), d.source.clone()))
             .collect();
         collection.environments = self.envs.clone();
+        collection.secrets.environments.clear();
         for (env, key) in &self.remember {
             if let Some(value) = self.secrets.get(env).and_then(|v| v.get(key)) {
                 collection
@@ -1355,6 +1356,71 @@ impl Duckie {
         self.io_busy = true;
         self.status = "Saving collection…".into();
         self.background(move || IoEvent::Saved(collection.save().map(|_| collection)));
+    }
+    pub fn name_environment(&mut self, duplicate: bool) {
+        let name = self.new_env.trim().to_string();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            || self
+                .envs
+                .iter()
+                .any(|env| env.name.eq_ignore_ascii_case(&name))
+        {
+            self.status =
+                "Choose a unique environment name using letters, numbers, '-' or '_'.".into();
+            return;
+        }
+        let old = self.envs[self.env_index].name.clone();
+        if duplicate {
+            let mut env = self.envs[self.env_index].clone();
+            env.name = name.clone();
+            self.secrets.remove(&name);
+            self.remember.retain(|(env, _)| env != &name);
+            self.envs.push(env);
+            self.env_index = self.envs.len() - 1;
+        } else {
+            self.envs[self.env_index].name = name.clone();
+            self.secrets.remove(&name);
+            self.remember.retain(|(env, _)| env != &name);
+            if let Some(values) = self.secrets.remove(&old) {
+                self.secrets.insert(name.clone(), values);
+            }
+            self.remember = self
+                .remember
+                .iter()
+                .map(|(env, key)| {
+                    (
+                        if env == &old {
+                            name.clone()
+                        } else {
+                            env.clone()
+                        },
+                        key.clone(),
+                    )
+                })
+                .collect();
+        }
+        self.new_env.clear();
+        self.env_dirty = true;
+    }
+    pub fn delete_environment(&mut self) {
+        if self.envs.len() <= 1 {
+            return;
+        }
+        let env = self.envs.remove(self.env_index).name;
+        self.secrets.remove(&env);
+        self.remember.retain(|(name, _)| name != &env);
+        self.env_index = self.env_index.min(self.envs.len() - 1);
+        self.env_dirty = true;
+    }
+    pub fn remove_secret(&mut self, env: &str, key: &str) {
+        if let Some(values) = self.secrets.get_mut(env) {
+            values.remove(key);
+        }
+        self.remember.remove(&(env.to_string(), key.to_string()));
+        self.env_dirty = true;
     }
     pub fn request_action(&mut self, action: Pending) {
         if self.io_busy {

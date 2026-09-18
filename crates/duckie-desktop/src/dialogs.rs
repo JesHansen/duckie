@@ -769,12 +769,19 @@ impl Duckie {
         let mut load = false;
         let mut export = false;
         egui::Window::new("Environments").open(&mut open).default_width(680.0).show(ctx,|ui| {
-            ui.horizontal(|ui|{egui::ComboBox::from_id_salt("edit-env").selected_text(&self.envs[self.env_index].name).show_ui(ui,|ui|{for (i,env) in self.envs.iter().enumerate(){ui.selectable_value(&mut self.env_index,i,&env.name);}});ui.add(egui::TextEdit::singleline(&mut self.new_env).hint_text("New environment name").desired_width(170.0));if ui.button("Add environment").clicked(){let name=self.new_env.trim();if !name.is_empty() && name.chars().all(|c|c.is_alphanumeric()||c=='-'||c=='_') && !self.envs.iter().any(|e|e.name==name){self.envs.push(Environment{name:name.into(),..Default::default()});self.env_index=self.envs.len()-1;self.new_env.clear();dirty=true;}}});
+            ui.horizontal(|ui|{egui::ComboBox::from_id_salt("edit-env").selected_text(&self.envs[self.env_index].name).show_ui(ui,|ui|{for (i,env) in self.envs.iter().enumerate(){ui.selectable_value(&mut self.env_index,i,&env.name);}});ui.add(egui::TextEdit::singleline(&mut self.new_env).hint_text("New environment name").desired_width(170.0));if ui.button("Add environment").clicked(){let name=self.new_env.trim();if !name.is_empty() && name.chars().all(|c|c.is_alphanumeric()||c=='-'||c=='_') && !self.envs.iter().any(|e|e.name.eq_ignore_ascii_case(name)){self.envs.push(Environment{name:name.into(),..Default::default()});self.env_index=self.envs.len()-1;self.new_env.clear();dirty=true;}}});
             ui.separator();ui.strong("Variables");ui.weak("Use {{env.name}} in a URL, header, or body.");
+            ui.horizontal(|ui| {
+                if ui.button("Rename using name above").clicked() { self.name_environment(false); }
+                if ui.button("Duplicate using name above").on_hover_text("Copies variables, without credentials").clicked() { self.name_environment(true); }
+                if ui.add_enabled(self.envs.len() > 1, egui::Button::new("Delete environment")).clicked() { self.delete_environment(); }
+            });
             dirty|=variables(ui,"environment-vars",&mut self.envs[self.env_index].values);
             ui.add_space(12.0);ui.strong("Secrets");ui.weak("Remember credentials in the request's Auth tab. Loaded values are session-only until remembered.");
-            let env=&self.envs[self.env_index].name;
-            if let Some(values)=self.secrets.get_mut(env){for (key,value) in values{ui.horizontal(|ui|{ui.label(key);dirty|=ui.add(egui::TextEdit::singleline(value).password(true).desired_width(330.0)).changed();ui.weak(if self.remember.contains(&(env.clone(),key.clone())){"Remembered"}else{"This session"});});}}
+            let env=self.envs[self.env_index].name.clone();
+            let mut remove = None;
+            if let Some(values)=self.secrets.get_mut(&env){for (key,value) in values{ui.horizontal(|ui|{ui.label(key);dirty|=ui.add(egui::TextEdit::singleline(value).password(true).desired_width(330.0)).changed();ui.weak(if self.remember.contains(&(env.clone(),key.clone())){"Remembered"}else{"This session"}); if ui.button("Remove").clicked() { remove = Some(key.clone()); }});}}
+            if let Some(key) = remove { self.remove_secret(&env, &key); }
             ui.separator();ui.weak(self.collection.as_ref().map(|c|c.root.display().to_string()).unwrap_or("Scratch workspace — choose a folder on Save".into()));
             ui.horizontal(|ui|{load=ui.button("Load secrets file…").clicked();export=ui.button("Export secrets…").clicked();if ui.button("Done").clicked(){self.env_dialog=false;}});
             ui.weak("Export writes plaintext credentials to a separate file you select.");

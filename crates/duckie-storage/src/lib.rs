@@ -254,6 +254,8 @@ struct WriteEntry {
     path: String,
     before: Option<String>,
     bytes: Vec<u8>,
+    #[serde(default)]
+    delete: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct Journal {
@@ -288,7 +290,12 @@ fn recover(root: &Path) -> Result<()> {
     // Verify the entire transaction before changing anything.
     for entry in &journal.entries {
         let current = disk_hash(&managed_path(root, &entry.path)?)?;
-        if current != entry.before && current != Some(hash(&entry.bytes)) {
+        let after = if entry.delete {
+            None
+        } else {
+            Some(hash(&entry.bytes))
+        };
+        if current != entry.before && current != after {
             bail!(
                 "Interrupted save conflicts with {}; preserve your files and resolve .duckie/pending-save.json",
                 entry.path
@@ -297,7 +304,11 @@ fn recover(root: &Path) -> Result<()> {
     }
     for entry in journal.entries {
         let path = managed_path(root, &entry.path)?;
-        if disk_hash(&path)? != Some(hash(&entry.bytes)) {
+        if entry.delete {
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+        } else if disk_hash(&path)? != Some(hash(&entry.bytes)) {
             atomic_write(&path, &entry.bytes)?;
         }
     }
@@ -566,9 +577,7 @@ impl Collection {
         }
         writes.push(("secrets.example.json".into(), json(&example)?));
         // Only values explicitly remembered by the UI enter this structure.
-        if !self.secrets.environments.is_empty() {
-            writes.push((".duckie/secrets.json".into(), json(&self.secrets)?));
-        }
+        writes.push((".duckie/secrets.json".into(), json(&self.secrets)?));
         let ignore_path = self.path(".gitignore")?;
         let mut ignore = fs::read_to_string(&ignore_path).unwrap_or_default();
         if !ignore.lines().any(|s| s == "/.duckie/") {
@@ -596,7 +605,20 @@ impl Collection {
                 path: relative,
                 before,
                 bytes,
+                delete: false,
             });
+        }
+        // Environment files are discovered on open, so obsolete names must be removed.
+        for (relative, before) in &self.hashes {
+            if relative.starts_with("environments/") && !seen.contains(relative) && before.is_some()
+            {
+                entries.push(WriteEntry {
+                    path: relative.clone(),
+                    before: before.clone(),
+                    bytes: vec![],
+                    delete: true,
+                });
+            }
         }
         let journal = Journal { entries };
         let journal_path = self.path(".duckie/pending-save.json")?;
@@ -604,7 +626,14 @@ impl Collection {
         recover(&self.root)?;
         self.manifest = manifest;
         for entry in journal.entries {
-            self.hashes.insert(entry.path, Some(hash(&entry.bytes)));
+            self.hashes.insert(
+                entry.path,
+                if entry.delete {
+                    None
+                } else {
+                    Some(hash(&entry.bytes))
+                },
+            );
         }
         Ok(())
     }
@@ -619,6 +648,25 @@ pub fn export_secrets(path: &Path, secrets: &SecretsFile) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn environment_and_secret_removal_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Collection::new(dir.path().into(), "lifecycle".into()).unwrap();
+        c.environments[0].name = "old".into();
+        c.secrets.environments.insert(
+            "old".into(),
+            Values::from([("token".into(), "private".into())]),
+        );
+        c.save().unwrap();
+        c.environments[0].name = "renamed".into();
+        c.secrets.environments.clear();
+        c.save().unwrap();
+        let reopened = Collection::open(dir.path()).unwrap();
+        assert_eq!(reopened.environments.len(), 1);
+        assert_eq!(reopened.environments[0].name, "renamed");
+        assert!(reopened.secrets.environments.is_empty());
+        assert!(!dir.path().join("environments/old.json").exists());
+    }
     #[test]
     fn bounded_reads_stop_after_the_limit_probe() {
         struct CountingReader {
@@ -698,6 +746,7 @@ mod tests {
                 path: "tests/a.test.js".into(),
                 before: None,
                 bytes: b"// safe source".to_vec(),
+                delete: false,
             }],
         };
         atomic_write(
