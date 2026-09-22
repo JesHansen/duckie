@@ -30,7 +30,7 @@ test("returns the message", () => {
 - Organize requests into local collections and environments that are easy to inspect and version.
 - Import Swagger 2.0 and OpenAPI 3.x JSON or YAML specifications, including multi-file specifications.
 - Inspect text, JSON, binary, compressed, and large responses without leaving the app.
-- Navigate bounded JSON responses as a tree and copy values or RFC 6901 JSON Pointers.
+- Navigate bounded JSON responses as a tree, copy values or RFC 6901 JSON Pointers, and keep a selected value as a session variable for later manual sends.
 - Run JavaScript assertions against a response, or rerun them without sending the request again.
 - Keep credentials session-only by default, with an explicit option to save them in a gitignored secrets file.
 
@@ -178,6 +178,8 @@ Response JSON and header rows can insert editable assertion snippets into the Te
 Use **Request → Run requests…** to review and sequentially execute the selected request, its folder, or the collection. Choose whether to stop at the first failure; cancellation stops the active operation and prevents later requests from starting. The final table distinguishes assertion and execution failures and can export JSON, JUnit XML, or standalone HTML.
 
 The response **Compare** tab compares the current result with another retained result or an explicitly saved baseline. It reports status, header, bounded text, and structural JSON changes. JSON object order is insignificant, array order remains significant, and comma-separated RFC 6901 pointers can ignore volatile fields. Baseline files contain response data and are limited to 2 MiB.
+
+In **JSON tree**, select a value, enter a session-variable name, and choose **Set**. The value is available as `{{request.name}}` for request preview and later manual sends until Duckie closes. It overrides a saved request variable with the same name without changing collection or environment files. Strings are stored as their text; other JSON values use compact JSON. Suite execution does not consume these manual session values.
 
 Response **Request details** shows the negotiated HTTP version, total duration, time until response headers arrived, and the combined body-transfer/decoding interval. Lower-level DNS, TCP, TLS, proxy, upload, server-wait, connection-reuse, and separate transfer/decoding measurements are labelled unavailable because the current transport cannot observe them reliably.
 

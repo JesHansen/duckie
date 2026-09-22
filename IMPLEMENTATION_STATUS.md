@@ -83,32 +83,21 @@ Lenient timeout defaults validated on 14 September 2026 in the working tree: new
 - The native UI includes dark/light/system themes, file dialogs, retained dirty drafts, grouped/collapsible folders and ordering, line-numbered editors, bounded syntax colouring, bracket matching, focused-editor find, and response snapshot labels. Editor undo buffers are not persisted.
 - **Request authentication** is one choice: none, bearer, or header API key. **Ctrl+T** reads the clipboard directly (Win32 `OpenClipboard`/`GetClipboardData`, no clipboard crate), selects bearer exclusively, and pastes into its secret — copy a token, press Ctrl+T, done. An empty or non-text clipboard falls back to switching to the Auth tab and focusing the token field for a manual paste.
 
-## Remaining work, in priority order
-
-### Tier B — correctness edges
-
-1. **Exact path-value encoding (area 6): completed 13 September 2026.** See the resolution and regression coverage below.
-2. **Charset and binary preview options (area 6): completed 13 September 2026.** See the resolution below.
-3. **Multi-process transaction locking (area 5): completed 13 September 2026.** See the resolution below. Tier B is now closed; lazy body/test loading remains open as Tier D item 8.
-
-### Tier C — import completeness (area 3): completed 13 September 2026
-
-4. **Multipart and richer request media handling.** See the resolution below.
-5. **Relative server URLs resolved against source identity, including multi-file specs.** See the resolution below.
-6. **Sanitized source provenance and reviewed reimport/update diffs that preserve local edits and tests.** See the resolution below. Scoped, by owner decision, to whole-operation replace: a reviewed diff decides which operations to touch, not which fields within one.
-7. **External example diagnostics.** Folded into item 6's resolution: `externalValue` content is now fetched, not just flagged as unfetched.
-
-### Tier D — smaller follow-up: completed 13 September 2026
-
-8. **Lazy test/body loading (area 5): completed 13 September 2026.** See the resolution below. As the prior note anticipated, this is a memory result, not a restore-time one: the same files are still read and hashed at open either way.
-
-Tier D is now closed. Every numbered backlog item is resolved; what remains is the owner-decided scope in this document and the deliberately deferred/excluded items below.
-
-### Deferred or excluded from v1
+## Current scope and limitations
 
 Cross-origin reference fetching is refused under the current credential-forwarding policy; reconsider only with explicit origin selection and credential isolation. Virtualized text pages were dropped after adaptive page sizing met the response-memory delta target and to preserve drag-selection across a page. Configurable connect timeout, proxy-secret bindings, structured-query editing around opaque templates, and F6 traversal are also outside the agreed remaining work.
 
 Scenario execution, plugin marketplace, login, token refresh, shared cookie sessions, cloud sync, and automatic spec polling remain outside v1.
+
+Completed work is recorded in the dated validation and resolution sections below rather than retained as an active backlog. The historical architecture and UI proposals do not reopen items that this document records as completed, deferred, or rejected.
+
+## Response comparison and manual value extraction (22 September 2026)
+
+Structural JSON comparison returns at most 500 body differences, including added and deleted object or array children; text comparison returns at most 200. The Compare tab explicitly says when further differences were omitted, separately from the existing notice that input bodies were limited to their first 2 MiB. Displayed JSON values are shortened on Unicode scalar boundaries.
+
+The JSON tree can place the selected value in an ephemeral session-variable map. Request preview and direct desktop sends resolve it through the existing `{{request.name}}` namespace, with session values taking precedence over saved request variables. Strings retain their text and other JSON types use compact JSON. These values last only for the desktop process, are not written to collection or environment files, and do not turn suite execution into response-driven chaining. Scenario execution remains outside v1.
+
+Validation on 22 September 2026: formatting, strict workspace Clippy, and all 162 non-measurement workspace tests passed; four performance measurements remained intentionally ignored. The regressions cover multibyte JSON display values, wide added and deleted child sets, the explicit incomplete-result signal, and session-variable preview precedence without saved-variable mutation. Both Node-backed end-to-end tests passed. No performance measurement, release build, or portable ZIP validation was run for these changes.
 
 ## Resolved: security review hardening
 

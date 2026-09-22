@@ -95,7 +95,7 @@ import(SourceDocument, ImportOptions)
 
 `ExecutionResult` contains a run ID, request revision, redacted request summary, transport outcome, optional status, ordered response headers, body handle, byte counts, and timings. Model HTTP 4xx/5xx as completed HTTP responses; DNS, TLS, timeout, cancellation, and size-limit outcomes are distinct. Tests can intentionally assert a 401 or 500 response.
 
-`RunBindings` is empty for ordinary v1 execution. It is an explicit, ephemeral override map reserved for callers such as a future scenario runner. The core does not infer relationships between requests or mutate environment files after a run.
+`RunBindings` is an explicit, ephemeral override map. The desktop uses it for user-directed response-value extraction during later manual sends; suite execution still passes an empty map. The core does not infer relationships between requests or mutate environment files after a run. Scenario execution remains outside v1.
 
 ### Thread and process model
 
@@ -233,12 +233,12 @@ Example generation prefers a selected named/media/parameter example, then schema
 Product policy for difficult inputs:
 
 - Internal JSON pointers and relative local JSON references are supported. Resolve local references only within the selected specification directory tree unless the user selects another file explicitly.
-- Remote references are fetched only as part of the explicit import operation, from the same origin by default. Other origins appear in review and require selection; do not forward credentials across origins. No background ref refresh.
+- Remote references are fetched only as part of the explicit import operation and must remain on the source origin. Cross-origin review was proposed here but is excluded from the current v1 credential policy. No background ref refresh.
 - Apply a 20 MiB root-document limit, 50 MiB total fetched input limit, 100-document reference limit, recursion-depth limit of 32, and 30-second acquisition deadline. Detect cycles and show their paths.
 - Respect supported parameter encoding, including ordinary `style`/`explode` combinations. Unsupported or ambiguous serialization blocks that affected request until edited; never create a runnable request with guessed encoding.
-- Unsupported auth schemes, callbacks, webhooks, external example assets, and schema features get operation-specific diagnostics. Import unaffected requests. Unresolved required values remain visible placeholders and block Send.
+- Unsupported auth schemes, callbacks, webhooks, and schema features get operation-specific diagnostics. Bounded same-origin `externalValue` example assets are now fetched; failures receive named diagnostics. Import unaffected requests. Unresolved required values remain visible placeholders and block Send.
 - Multiple media types and examples are selectable before import. Generate no response fixtures and no test scripts. A Tests tab starts empty.
-- Store source identity and operation identity without auth values. Reimport defaults to a new collection. Updating an existing collection requires an explicit per-request diff and preserves edited bodies/tests unless replacement is chosen.
+- Store source identity and operation identity without auth values. Reimport defaults to a new collection. Updating an existing collection uses an explicit whole-operation review, keeps request identity and tests, and replaces the other generated request fields for selected changes.
 
 ## 8. Extension architecture and future scenarios
 
@@ -291,4 +291,4 @@ A repeatable regression beyond measurement noise blocks a convenience feature ev
 
 Keep protocol/domain tests independent of the GUI. Use a deterministic local HTTP test server for transport behavior and ensure network-failure tests never depend on a public service. Test future scenario readiness with a development-only caller executing three dependent requests through the same contracts; this does not ship as a v1 feature.
 
-Before implementation, the remaining choices are limited: validate the proposed Windows baseline against the team's machines, obtain representative sanitized OpenAPI fixtures and corporate network behavior, and select an application license appropriate to the project's distribution goals. These do not block this proposal. Source and dependency license decisions deserve an explicit repository decision before public distribution; no license is inferred from the product philosophy alone.
+Those were pre-implementation planning questions. Current validation, measured limits, accepted scope, and licensing are recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md), [PERFORMANCE.md](PERFORMANCE.md), and [README.md](README.md); this proposal is not an active checklist.

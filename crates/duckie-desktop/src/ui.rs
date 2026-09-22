@@ -2131,6 +2131,24 @@ impl Duckie {
                         if ui.button("Copy JSON Pointer").clicked() {
                             ui.ctx().copy_text(view.tree.selected.clone());
                         }
+                        ui.label("Session variable");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut view.tree.variable_name)
+                                .desired_width(120.0)
+                                .hint_text("name"),
+                        );
+                        if ui.button("Set").clicked() {
+                            let name = view.tree.variable_name.trim();
+                            if name.is_empty() || name.contains(['{', '}', '\r', '\n']) {
+                                self.status = "Enter a session-variable name without braces".into();
+                            } else {
+                                self.session_variables
+                                    .insert(name.to_owned(), json_value_text(selected));
+                                self.status = format!(
+                                    "Set session variable {{request.{name}}} until Duckie closes"
+                                );
+                            }
+                        }
                         let sensitive=view.tree.selected.to_ascii_lowercase().contains("token")||view.tree.selected.to_ascii_lowercase().contains("password")||view.tree.selected.to_ascii_lowercase().contains("secret");
                         if ui.button("Assert type").clicked(){let kind=match selected{serde_json::Value::Null=>"null",serde_json::Value::Bool(_)=>"boolean",serde_json::Value::Number(_)=>"number",serde_json::Value::String(_)=>"string",serde_json::Value::Array(_)=>"array",serde_json::Value::Object(_)=>"object"};let p=serde_json::to_string(&view.tree.selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON value has expected type\", () => {{\n  expect(response.jsonPointer({p}), {p}).toBeType(\"{kind}\");\n}});\n"));}
                         if matches!(selected,serde_json::Value::Array(_))&&ui.button("Assert array length").clicked(){let len=selected.as_array().unwrap().len();let p=serde_json::to_string(&view.tree.selected).unwrap();assertion_snippet=Some(format!("\ntest(\"JSON array has expected length\", () => {{\n  expect(response.jsonPointer({p}).length, {p}).toBe({len});\n}});\n"));}
@@ -2333,6 +2351,12 @@ impl Duckie {
                     }
                     if c.truncated {
                         ui.weak("Body comparison limited to the first 2 MiB.");
+                    }
+                    if c.incomplete {
+                        ui.colored_label(
+                            warning(ui),
+                            "Comparison incomplete: showing the first 500 JSON differences or 200 text differences.",
+                        );
                     }
                 }
             }
@@ -2899,6 +2923,24 @@ mod tests {
         app.drafts[3].request.url = "{{secret.host}}/items".into();
         app.new_request();
         assert!(app.drafts[4].request.url.is_empty());
+    }
+    #[test]
+    fn session_variables_feed_preview_without_changing_saved_request_variables() {
+        let (_, mut app) = app_with(&[""]);
+        app.drafts[0].request.url = "http://example.test/items/{{request.id}}".into();
+        app.drafts[0]
+            .request
+            .variables
+            .insert("id".into(), "saved".into());
+        app.session_variables
+            .insert("id".into(), "extracted".into());
+
+        app.refresh_request_preview();
+
+        let preview = app.request_preview.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(preview.summary.url, "http://example.test/items/extracted");
+        assert_eq!(app.drafts[0].request.variables["id"], "saved");
+        assert!(!app.env_dirty);
     }
     #[test]
     fn sidebar_filter_matches_words_across_fields_and_unicode() {

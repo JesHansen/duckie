@@ -1,6 +1,6 @@
 # Duckie UI design proposal
 
-Original proposal, 13 September 2026. These wireframes describe the proposed behavior and layout, not screenshots or a statement of current feature coverage. See [current owner decisions and implementation status](IMPLEMENTATION_STATUS.md) for later changes and accepted scope. Companion document: [Architecture proposal](ARCHITECTURE.md).
+Original proposal, 13 September 2026. These wireframes describe the proposed behavior and layout, not screenshots, current limitations, or an active backlog. Findings here that later work resolved stay closed according to [current owner decisions and implementation status](IMPLEMENTATION_STATUS.md). Companion document: [Architecture proposal](ARCHITECTURE.md).
 
 ## 1. Design intent
 
@@ -244,11 +244,11 @@ The review includes editable collection name and destination folder, server-vari
 
 Distinguish **Needs input** from **Unsupported**. Missing path values and credentials can be filled after import; unsupported serialization leaves the affected request disabled for Send until corrected. A malformed root document or unrecognized major version blocks import entirely. Unaffected operations can still be imported when others have diagnosed problems.
 
-Generated values are labeled **From example** or **Generated placeholder**. They are editable immediately after import. Reference resolution issues list the referring location and referenced file/URL. Additional remote origins require explicit selection in this review. Import never follows API operation links or sends a generated example request.
+Generated values are labeled **From example** or **Generated placeholder**. They are editable immediately after import. Reference resolution issues list the referring location and referenced file/URL. The current v1 credential policy refuses additional remote origins; the proposed selection flow was not accepted. Import never follows API operation links or sends a generated example request.
 
 On completion, select the first imported request and show a compact result message: **Imported 24 requests; 3 need input**. The ordinary sidebar/editor is now the workspace. No separate spec-bound editor or read-only imported state persists.
 
-Reimport defaults to a new collection. An explicit Update existing choice shows per-request changes and options to keep local edits or replace selected generated fields. Tests are preserved unless deliberately replaced. No silent source synchronization or periodic URL polling.
+Reimport defaults to a new collection. Update existing shows whole-operation changes for review; accepted changes retain request identity and tests while replacing the other generated fields. No silent source synchronization or periodic URL polling.
 
 ## 8. Saving, conflicts, and errors
 
@@ -293,7 +293,7 @@ Standard Tab navigation, selection, copy/paste, and editor undo/redo apply. Show
 
 Keep v1 navigation focused on Requests. Do not show disabled Scenarios, marketplace, or upgrade destinations. When a scenario extension exists, it may add a **Scenarios** sidebar section and a step editor in the main area. It reuses the same environment picker, request references, response viewer, and assertion results. A disabled plugin contributes no visible placeholder or background process. This is a future layout allowance, not a v1 deliverable.
 
-The initial UI is ready for implementation when these walkthroughs have clear outcomes:
+These were the proposal's acceptance walkthroughs:
 
 1. Launch offline into a focused URL field; paste a URL/token, Send, and inspect status/body using only the keyboard. No collection or account is required first.
 2. Save an internal request with a remembered bearer binding; inspect the files and find the token only in the separate secrets file. Change environment and see missing credentials rather than reusing the previous token.
@@ -305,4 +305,4 @@ The initial UI is ready for implementation when these walkthroughs have clear ou
 8. Share a collection normally without secrets; deliberately export a separate secrets file when wanted. Handle an external file edit without overwriting it silently.
 9. Repeat the common path with Narrator, keyboard only, 200% scaling, and remote desktop. Confirm launch/idle/input targets against the architecture's benchmark protocol.
 
-These walkthroughs validate the proposed behavior. Visual spacing, editor choice, accessibility coverage, and performance remain subjects for the first native prototype; neither this document nor its wireframes claims that those checks have already passed.
+These walkthroughs explain the proposal's intent. Current validation and remaining limitations belong in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and measured results in [PERFORMANCE.md](PERFORMANCE.md); this historical proposal makes no current coverage claim.

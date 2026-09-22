@@ -282,7 +282,10 @@ pub struct Comparison {
     pub status: Option<(Option<u16>, Option<u16>)>,
     pub headers: Vec<String>,
     pub differences: Vec<String>,
+    /// The body bytes were clipped before comparison.
     pub truncated: bool,
+    /// More differences exist than are present in `differences`.
+    pub incomplete: bool,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -379,9 +382,20 @@ pub fn compare(left: &ExecutionResult, right: &ExecutionResult, ignored: &[Strin
                 *slot = serde_json::Value::Null
             }
         }
-        fn walk(path: &str, l: &serde_json::Value, r: &serde_json::Value, out: &mut Vec<String>) {
-            if out.len() >= 500 {
-                return;
+        fn walk(
+            path: &str,
+            l: &serde_json::Value,
+            r: &serde_json::Value,
+            out: &mut Vec<String>,
+            incomplete: &mut bool,
+        ) {
+            const LIMIT: usize = 500;
+            fn record(out: &mut Vec<String>, incomplete: &mut bool, difference: String) {
+                if out.len() < LIMIT {
+                    out.push(difference);
+                } else {
+                    *incomplete = true;
+                }
             }
             match (l, r) {
                 (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
@@ -392,9 +406,9 @@ pub fn compare(left: &ExecutionResult, right: &ExecutionResult, ignored: &[Strin
                     {
                         let p = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
                         match (a.get(key), b.get(key)) {
-                            (Some(x), Some(y)) => walk(&p, x, y, out),
-                            (Some(_), None) => out.push(format!("- {p}")),
-                            (None, Some(_)) => out.push(format!("+ {p}")),
+                            (Some(x), Some(y)) => walk(&p, x, y, out, incomplete),
+                            (Some(_), None) => record(out, incomplete, format!("- {p}")),
+                            (None, Some(_)) => record(out, incomplete, format!("+ {p}")),
                             _ => {}
                         }
                     }
@@ -403,56 +417,86 @@ pub fn compare(left: &ExecutionResult, right: &ExecutionResult, ignored: &[Strin
                     for i in 0..a.len().max(b.len()) {
                         let p = format!("{path}/{i}");
                         match (a.get(i), b.get(i)) {
-                            (Some(x), Some(y)) => walk(&p, x, y, out),
-                            (Some(_), None) => out.push(format!("- {p}")),
-                            (None, Some(_)) => out.push(format!("+ {p}")),
+                            (Some(x), Some(y)) => walk(&p, x, y, out, incomplete),
+                            (Some(_), None) => record(out, incomplete, format!("- {p}")),
+                            (None, Some(_)) => record(out, incomplete, format!("+ {p}")),
                             _ => {}
                         }
                     }
                 }
-                _ if l != r => out.push(format!(
-                    "~ {}: {} → {}",
-                    if path.is_empty() { "/" } else { path },
-                    bounded(l),
-                    bounded(r)
-                )),
+                _ if l != r => record(
+                    out,
+                    incomplete,
+                    format!(
+                        "~ {}: {} → {}",
+                        if path.is_empty() { "/" } else { path },
+                        bounded(l),
+                        bounded(r)
+                    ),
+                ),
                 _ => {}
             }
         }
         fn bounded(v: &serde_json::Value) -> String {
-            let mut s = serde_json::to_string(v).unwrap_or_default();
-            if s.len() > 160 {
-                s.truncate(160);
-                s.push('…')
+            let s = serde_json::to_string(v).unwrap_or_default();
+            let mut chars = s.chars();
+            let shortened = chars.by_ref().take(160).collect::<String>();
+            if chars.next().is_some() {
+                format!("{shortened}…")
+            } else {
+                s
             }
-            s
         }
-        walk("", &l, &r, &mut differences);
+        let mut incomplete = false;
+        walk("", &l, &r, &mut differences, &mut incomplete);
+        return Comparison {
+            status,
+            headers,
+            differences,
+            truncated,
+            incomplete,
+        };
     } else if lb != rb {
         let l = String::from_utf8_lossy(&lb);
         let r = String::from_utf8_lossy(&rb);
+        let mut incomplete = false;
         for (i, (a, b)) in l.lines().zip(r.lines()).enumerate() {
             if a != b {
-                differences.push(format!(
-                    "line {}: {} → {}",
-                    i + 1,
-                    a.chars().take(160).collect::<String>(),
-                    b.chars().take(160).collect::<String>()
-                ));
-                if differences.len() >= 200 {
-                    break;
+                if differences.len() < 200 {
+                    differences.push(format!(
+                        "line {}: {} → {}",
+                        i + 1,
+                        a.chars().take(160).collect::<String>(),
+                        b.chars().take(160).collect::<String>()
+                    ));
+                } else {
+                    incomplete = true;
                 }
             }
         }
-        if differences.is_empty() {
+        if l.lines().count() != r.lines().count() {
+            if differences.len() < 200 {
+                differences.push("Body length or trailing lines changed".into());
+            } else {
+                incomplete = true;
+            }
+        } else if differences.is_empty() {
             differences.push("Body length or trailing lines changed".into());
         }
+        return Comparison {
+            status,
+            headers,
+            differences,
+            truncated,
+            incomplete,
+        };
     }
     Comparison {
         status,
         headers,
         differences,
         truncated,
+        incomplete: false,
     }
 }
 
@@ -750,6 +794,42 @@ mod feature_tests {
         assert!(c.status.is_some());
         assert_eq!(c.differences, Vec::<String>::new());
         assert_eq!(c.headers.len(), 2);
+    }
+    #[test]
+    fn comparison_bounds_unicode_values_without_panicking() {
+        let left_value = "æ".repeat(200);
+        let right_value = "ø".repeat(200);
+        let left = result(
+            200,
+            &serde_json::json!({"value": left_value}).to_string(),
+            vec![],
+        );
+        let right = result(
+            200,
+            &serde_json::json!({"value": right_value}).to_string(),
+            vec![],
+        );
+        let comparison = compare(&left, &right, &[]);
+        assert_eq!(comparison.differences.len(), 1);
+        assert!(comparison.differences[0].contains('…'));
+        assert!(!comparison.incomplete);
+    }
+    #[test]
+    fn comparison_caps_added_and_deleted_children_and_reports_incomplete_results() {
+        let left = result(
+            200,
+            &serde_json::to_string(&(0..600).collect::<Vec<_>>()).unwrap(),
+            vec![],
+        );
+        let right = result(200, "[]", vec![]);
+        let comparison = compare(&left, &right, &[]);
+        assert_eq!(comparison.differences.len(), 500);
+        assert!(comparison.incomplete);
+        assert!(!comparison.truncated);
+
+        let reverse = compare(&right, &left, &[]);
+        assert_eq!(reverse.differences.len(), 500);
+        assert!(reverse.incomplete);
     }
     #[test]
     fn reports_are_deterministic_and_escape_markup() {
