@@ -1889,6 +1889,7 @@ impl Duckie {
         let mut start_search = None;
         let mut go_to = None;
         let mut assertion_snippet = None;
+        let mut template_variable = None;
         match self.response_tab {
             ResponseTab::Body => {
                 let shown = if self.pretty {
@@ -2131,7 +2132,7 @@ impl Duckie {
                         if ui.button("Copy JSON Pointer").clicked() {
                             ui.ctx().copy_text(view.tree.selected.clone());
                         }
-                        ui.label("Session variable");
+                        ui.label("Template variable");
                         ui.add(
                             egui::TextEdit::singleline(&mut view.tree.variable_name)
                                 .desired_width(120.0)
@@ -2140,13 +2141,10 @@ impl Duckie {
                         if ui.button("Set").clicked() {
                             let name = view.tree.variable_name.trim();
                             if name.is_empty() || name.contains(['{', '}', '\r', '\n']) {
-                                self.status = "Enter a session-variable name without braces".into();
+                                self.status = "Enter a template-variable name without braces".into();
                             } else {
-                                self.session_variables
-                                    .insert(name.to_owned(), json_value_text(selected));
-                                self.status = format!(
-                                    "Set session variable {{request.{name}}} until Duckie closes"
-                                );
+                                template_variable =
+                                    Some((name.to_owned(), json_value_text(selected)));
                             }
                         }
                         let sensitive=view.tree.selected.to_ascii_lowercase().contains("token")||view.tree.selected.to_ascii_lowercase().contains("password")||view.tree.selected.to_ascii_lowercase().contains("secret");
@@ -2541,6 +2539,18 @@ impl Duckie {
             self.drafts[self.selected].revision += 1;
             self.request_tab = RequestTab::Tests;
         }
+        if let Some((name, value)) = template_variable {
+            let created = !self.drafts[self.selected]
+                .request
+                .variables
+                .contains_key(&name);
+            self.drafts[self.selected].set_template_variable(name.clone(), value);
+            self.request_tab = RequestTab::Params;
+            self.status = format!(
+                "{} template variable {{{{request.{name}}}}}",
+                if created { "Created" } else { "Updated" }
+            );
+        }
         if let Some((base, value)) = location {
             match url_join(&base, &value) {
                 Ok(url) => {
@@ -2925,22 +2935,25 @@ mod tests {
         assert!(app.drafts[4].request.url.is_empty());
     }
     #[test]
-    fn session_variables_feed_preview_without_changing_saved_request_variables() {
+    fn extracted_template_variables_are_visible_dirty_and_used_by_preview() {
         let (_, mut app) = app_with(&[""]);
         app.drafts[0].request.url = "http://example.test/items/{{request.id}}".into();
-        app.drafts[0]
-            .request
-            .variables
-            .insert("id".into(), "saved".into());
-        app.session_variables
-            .insert("id".into(), "extracted".into());
+        app.drafts[0].set_template_variable("id".into(), "extracted".into());
 
         app.refresh_request_preview();
 
         let preview = app.request_preview.as_ref().unwrap().as_ref().unwrap();
         assert_eq!(preview.summary.url, "http://example.test/items/extracted");
-        assert_eq!(app.drafts[0].request.variables["id"], "saved");
+        assert_eq!(app.drafts[0].request.variables["id"], "extracted");
+        assert!(app.drafts[0].dirty);
+        assert_eq!(app.drafts[0].revision, 1);
         assert!(!app.env_dirty);
+
+        app.drafts[0].variable_rows = vec![Row::new("id", "extracted")];
+        app.drafts[0].set_template_variable("id".into(), "updated".into());
+        assert_eq!(app.drafts[0].variable_rows[0].value, "updated");
+        assert_eq!(app.drafts[0].request.variables["id"], "updated");
+        assert_eq!(app.drafts[0].revision, 2);
     }
     #[test]
     fn sidebar_filter_matches_words_across_fields_and_unicode() {

@@ -30,7 +30,7 @@ test("returns the message", () => {
 - Organize requests into local collections and environments that are easy to inspect and version.
 - Import Swagger 2.0 and OpenAPI 3.x JSON or YAML specifications, including multi-file specifications.
 - Inspect text, JSON, binary, compressed, and large responses without leaving the app.
-- Navigate bounded JSON responses as a tree, copy values or RFC 6901 JSON Pointers, and keep a selected value as a session variable for later manual sends.
+- Navigate bounded JSON responses as a tree, copy values or RFC 6901 JSON Pointers, and store a selected value as a request Template variable.
 - Run JavaScript assertions against a response, or rerun them without sending the request again.
 - Keep credentials session-only by default, with an explicit option to save them in a gitignored secrets file.
 
@@ -179,7 +179,7 @@ Use **Request → Run requests…** to review and sequentially execute the selec
 
 The response **Compare** tab compares the current result with another retained result or an explicitly saved baseline. It reports status, header, bounded text, and structural JSON changes. JSON object order is insignificant, array order remains significant, and comma-separated RFC 6901 pointers can ignore volatile fields. Baseline files contain response data and are limited to 2 MiB.
 
-In **JSON tree**, select a value, enter a session-variable name, and choose **Set**. The value is available as `{{request.name}}` for request preview and later manual sends until Duckie closes. It overrides a saved request variable with the same name without changing collection or environment files. Strings are stored as their text; other JSON values use compact JSON. Suite execution does not consume these manual session values.
+In **JSON tree**, select a value, enter a Template-variable name, and choose **Set**. Duckie creates or updates that variable on the current request, switches the request pane to **Params**, and makes the request dirty so the value follows the normal collection Save flow. Reference it as `{{request.name}}` in the URL, parameters, headers, or body. Strings are stored as their text; other JSON values use compact JSON. Because this is an ordinary request variable, previews, direct sends, and suites all use it.
 
 Response **Request details** shows the negotiated HTTP version, total duration, time until response headers arrived, and the combined body-transfer/decoding interval. Lower-level DNS, TCP, TLS, proxy, upload, server-wait, connection-reuse, and separate transfer/decoding measurements are labelled unavailable because the current transport cannot observe them reliably.
 
@@ -223,7 +223,7 @@ This section is the canonical record of current owner decisions. Historical prop
 
 - Duckie is a Windows-only, local HTTP workbench. It has no account, hosted service, telemetry, activation, automatic update check, cloud synchronization, or unsolicited network activity. Network access occurs only when the user sends a request or explicitly imports a specification URL.
 - Collections are ordinary local files. Secrets stay in session memory unless the user explicitly remembers or exports them. Remembered secrets, response spool files, selected uploads, and exported secret files are local sensitive artifacts; OS paging, backups, and other programs remain outside Duckie's deletion guarantees.
-- Scenario execution, schedules, load testing, login, automatic token acquisition or refresh, shared cookie sessions, plugin discovery, GraphQL schema tooling, gRPC, WebSockets, and cloud collaboration are outside the accepted v1 scope. Manual response-value extraction supports interactive work but does not make suites response-driven.
+- Scenario execution, schedules, load testing, login, automatic token acquisition or refresh, shared cookie sessions, plugin discovery, GraphQL schema tooling, gRPC, WebSockets, and cloud collaboration are outside the accepted v1 scope. Manual response-value extraction writes an ordinary request Template variable; it does not make suites response-driven.
 - Authentication is a single choice among none, bearer, or one header API key. Users can author other headers manually, but Duckie does not treat literal credentials as secret bindings. Basic authentication, client certificates, OAuth flows, and authenticated enterprise proxies are unsupported.
 - Duckie sends each request once. Automatic retries and redirect following are disabled. A 3xx response remains inspectable and can create a fresh GET draft; credentials are not inherited. There is no cookie jar.
 - One desktop request or test evaluation runs at a time. Sending captures an immutable request, environment, and test-source revision. Editing can continue while it runs, and the result stays attached to the captured revision.
@@ -254,7 +254,7 @@ The Cargo workspace keeps model, storage, transport, import, test execution, orc
 Future changes must preserve these invariants:
 
 - Prepared requests own fully resolved immutable input. Secret-bearing types must not expose values through default debug output, reports, history, or collection files.
-- `RunBindings` are ephemeral overrides. Direct desktop sends use them for explicit response-value extraction; suites currently pass an empty map. They must not mutate environment files.
+- `RunBindings` remain an explicit ephemeral override mechanism for future run-scoped callers. Ordinary desktop and suite execution currently pass an empty map; response-value extraction writes the current request's saved Template variables instead.
 - URL interpolation is single-pass. Path substitutions encode structural characters, preserve valid existing percent escapes and supported OpenAPI style punctuation, and reject complete dot-traversal segments before URL parsing. Response-derived redirect query rows remain literal until edited.
 - Header and query rows preserve order and duplicate names. Untouched query values retain literal provenance; editing restores normal template behavior. Serialization must never guess an undefined OpenAPI shape.
 - Response decoding is streamed with encoded and decoded caps around every supported decoder. Do not buffer a compressed body before applying limits. Unknown, malformed, or stacked content encodings stop processing with bounded safe diagnostics.

@@ -222,6 +222,23 @@ impl Draft {
         let headers = crate::bulk::apply(&mut self.headers_bulk, &mut self.request.headers, ':');
         query && headers
     }
+    pub fn set_template_variable(&mut self, name: String, value: String) -> bool {
+        let changed = self.request.variables.get(&name) != Some(&value);
+        self.request.variables.insert(name.clone(), value.clone());
+        if !self.variable_rows.is_empty() {
+            if let Some(row) = self.variable_rows.iter_mut().find(|row| row.name == name) {
+                row.value = value;
+            } else {
+                self.variable_rows.push(Row::new(name, value));
+            }
+        }
+        if changed {
+            self.dirty = true;
+            self.revision += 1;
+            self.error.clear();
+        }
+        changed
+    }
 }
 /// Whole-body search results. Offsets are absolute byte positions in the response body, so they
 /// stay meaningful across page changes, unlike the per-page hits the editor highlights.
@@ -443,8 +460,6 @@ pub struct Duckie {
     pub secrets: BTreeMap<String, Values>,
     pub remember: BTreeSet<(String, String)>,
     pub env_dirty: bool,
-    /// Values extracted from responses for manual sends. These are never persisted.
-    pub session_variables: Values,
     pub request_tab: RequestTab,
     pub response_tab: ResponseTab,
     pub search: String,
@@ -539,7 +554,6 @@ impl Duckie {
             secrets: BTreeMap::new(),
             remember: BTreeSet::new(),
             env_dirty: false,
-            session_variables: Values::new(),
             request_tab: RequestTab::Params,
             response_tab: ResponseTab::Body,
             search: String::new(),
@@ -856,7 +870,7 @@ impl Duckie {
             preview(
                 &d.request,
                 &self.snapshot(),
-                &RunBindings(self.session_variables.clone()),
+                &RunBindings::default(),
                 d.revision,
             )
             .map_err(|e| e.to_string()),
@@ -1002,8 +1016,7 @@ impl Duckie {
         let env = self.snapshot();
         let d = &self.drafts[self.selected];
         let history_input = (d.request.clone(), d.source.clone());
-        let bindings = RunBindings(self.session_variables.clone());
-        let result = prepare(&d.request, &env, &bindings, d.revision).and_then(|p| {
+        let result = prepare(&d.request, &env, &RunBindings::default(), d.revision).and_then(|p| {
             self.service.send(
                 p,
                 d.source.clone(),
