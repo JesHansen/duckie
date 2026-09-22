@@ -1,4 +1,4 @@
-//! Development-only measurement hooks for the benchmark protocol in ARCHITECTURE.md.
+//! Development-only measurement hooks for the benchmark protocol in README.md.
 //!
 //! Never compiled into a packaged build: `scripts/package.ps1` refuses a binary containing
 //! the marker below. Milestones are absolute epoch milliseconds so the harness can subtract

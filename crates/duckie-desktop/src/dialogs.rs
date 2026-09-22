@@ -466,11 +466,20 @@ impl Duckie {
             self.disk_dialog(ctx);
         }
         if self.about {
-            egui::Window::new("About Duckie").open(&mut self.about).resizable(false).show(ctx,|ui|{
-            ui.heading("Duckie 1.0.0");ui.label("A small, local HTTP workbench for Windows.");ui.separator();
-            if ui.button("Keyboard shortcuts · F1").clicked() { self.shortcuts_open = true; ctx.memory_mut(|m| m.request_focus(egui::Id::new("shortcut-search"))); }
-            ui.separator();ui.label("See README.md and IMPLEMENTATION_STATUS.md for coverage and release gates.");
-        });
+            egui::Window::new("About Duckie")
+                .open(&mut self.about)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.heading("Duckie 1.0.0");
+                    ui.label("A small, local HTTP workbench for Windows.");
+                    ui.separator();
+                    if ui.button("Keyboard shortcuts · F1").clicked() {
+                        self.shortcuts_open = true;
+                        ctx.memory_mut(|m| m.request_focus(egui::Id::new("shortcut-search")));
+                    }
+                    ui.separator();
+                    ui.label("See README.md for usage, scope, open work, and release gates.");
+                });
         }
     }
     fn suite_dialog(&mut self, ctx: &egui::Context) {

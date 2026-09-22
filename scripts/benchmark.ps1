@@ -1,4 +1,4 @@
-# Runs the benchmark protocol from ARCHITECTURE.md against release binaries.
+# Runs the benchmark protocol from README.md against release binaries.
 # Requires a build with the bench feature:
 #   cargo build --workspace --release --features duckie-desktop/bench
 param(

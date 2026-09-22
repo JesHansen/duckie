@@ -1,4 +1,4 @@
-// Deterministic benchmark fixtures for ARCHITECTURE.md #9. No dependencies.
+// Deterministic benchmark fixtures for the README.md benchmark protocol. No dependencies.
 // Usage: node scripts/make-fixtures.mjs [output-dir]   (defaults to fixtures/ at the repo root)
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

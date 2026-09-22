@@ -27,7 +27,7 @@ try {
     foreach ($file in @('duckie.exe', 'duckie-cli.exe', 'duckie-test-worker.exe')) {
         Copy-Item -LiteralPath (Join-Path $root "target/release/$file") -Destination $destination -Force
     }
-    foreach ($file in @('LICENSE', 'README.md', 'IMPLEMENTATION_STATUS.md', 'PERFORMANCE.md')) {
+    foreach ($file in @('LICENSE', 'README.md')) {
         Copy-Item -LiteralPath (Join-Path $root $file) -Destination $destination -Force
     }
     $notices = [System.Text.StringBuilder]::new()

@@ -213,9 +213,144 @@ Shortcut bindings and reference text live in
 verify it without writing. Workspace tests also check that the generated reference
 matches the binding table.
 
-Node.js is needed for the local development server and the two end-to-end tests that use it. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for current decisions and known defects, and [PERFORMANCE.md](PERFORMANCE.md) for reproducible benchmark procedures and measurements. [ARCHITECTURE.md](ARCHITECTURE.md) and [UI_DESIGN.md](UI_DESIGN.md) are historical design proposals rather than an introduction to the current product.
+Node.js is needed for the local development server, fixture generator, and the two end-to-end tests that use it.
 
 The UI uses [eframe/egui](https://docs.rs/eframe/0.36.2/eframe/), and response assertions use [rquickjs](https://docs.rs/rquickjs/0.13.0/rquickjs/). Dependencies are fixed by `Cargo.lock`.
+
+## Product contract and scope
+
+This section is the canonical record of current owner decisions. Historical proposals and completed implementation plans are deliberately omitted.
+
+- Duckie is a Windows-only, local HTTP workbench. It has no account, hosted service, telemetry, activation, automatic update check, cloud synchronization, or unsolicited network activity. Network access occurs only when the user sends a request or explicitly imports a specification URL.
+- Collections are ordinary local files. Secrets stay in session memory unless the user explicitly remembers or exports them. Remembered secrets, response spool files, selected uploads, and exported secret files are local sensitive artifacts; OS paging, backups, and other programs remain outside Duckie's deletion guarantees.
+- Scenario execution, schedules, load testing, login, automatic token acquisition or refresh, shared cookie sessions, plugin discovery, GraphQL schema tooling, gRPC, WebSockets, and cloud collaboration are outside the accepted v1 scope. Manual response-value extraction supports interactive work but does not make suites response-driven.
+- Authentication is a single choice among none, bearer, or one header API key. Users can author other headers manually, but Duckie does not treat literal credentials as secret bindings. Basic authentication, client certificates, OAuth flows, and authenticated enterprise proxies are unsupported.
+- Duckie sends each request once. Automatic retries and redirect following are disabled. A 3xx response remains inspectable and can create a fresh GET draft; credentials are not inherited. There is no cookie jar.
+- One desktop request or test evaluation runs at a time. Sending captures an immutable request, environment, and test-source revision. Editing can continue while it runs, and the result stays attached to the captured revision.
+- Test scripts receive a completed response and cannot access the filesystem, network, shell, modules, or Node.js APIs. Each evaluation uses a fresh worker process. The worker has engine, watchdog, and Windows job limits, but it runs with the user's ordinary OS permissions and is not an OS security sandbox.
+- OpenAPI imports can fetch same-origin remote references during the explicit import action. Cross-origin fetching is refused under the current credential-forwarding policy. Reimport is reviewed at whole-operation granularity: selected changes retain request identity and tests and replace the other generated fields.
+- The v1 memory ceiling is 500,000,000 bytes for the desktop plus any active test worker. Performance claims must identify the measured process, fixture, build features, trial count, and baseline. A focused or CPU-only measurement is not a full release-gate result.
+- Release version changes do not prove that binaries or a portable ZIP were rebuilt. A release claim must identify the commit, checks, build configuration, package, and validation performed on that exact artifact.
+
+### Current limits
+
+| Area | Limit or behavior |
+| --- | --- |
+| Request deadline | 10 minutes by default; configurable from 1 ms to 1 hour. Connection setup and transfer share it. |
+| Response capture | Separate encoded and decoded limits, 50 MiB by default and configurable up to 1 GiB. Limit hits retain a visibly incomplete body and skip automatic tests. |
+| Response storage | Bodies spill from memory after 2 MiB. Preview pages use 1 MiB for ordinary lines and 128 KiB for very long lines. |
+| JSON tree | Complete valid JSON only, at most 2 MiB, 128 levels, and 10,000 laid-out rows. Raw body view remains available. |
+| Compare | First 2 MiB of each body; at most 500 structural JSON differences or 200 text differences. Omitted results and body clipping are reported separately. |
+| Tests | Body access is bounded; metadata assertions remain available when body access is unavailable. Async callbacks are unsupported. |
+| Retained responses | At most three response panes. Session history keeps 100 metadata entries and 20 MiB of shared response bodies, evicting old bodies before metadata. |
+| Managed files | Collection JSON and body reads are capped at 20 MiB; test sources at 1 MiB. Unknown compatible fields round-trip. |
+| OpenAPI acquisition | At most 50 external attempts and 20 MiB received, under one 10-minute deadline. Local targets must canonicalize inside the selected specification folder. |
+| Editor and search | Syntax coloring stops after 64 KiB; editor find is capped at 5,000 hits and whole-body search at 50,000 hits. |
+
+## Architecture and implementation invariants
+
+The Cargo workspace keeps model, storage, transport, import, test execution, orchestration, CLI, and desktop presentation separate. The domain model must not depend on egui, reqwest, or the JavaScript engine. Import produces a reviewable draft; tests consume a response and do not control transport.
+
+Future changes must preserve these invariants:
+
+- Prepared requests own fully resolved immutable input. Secret-bearing types must not expose values through default debug output, reports, history, or collection files.
+- `RunBindings` are ephemeral overrides. Direct desktop sends use them for explicit response-value extraction; suites currently pass an empty map. They must not mutate environment files.
+- URL interpolation is single-pass. Path substitutions encode structural characters, preserve valid existing percent escapes and supported OpenAPI style punctuation, and reject complete dot-traversal segments before URL parsing. Response-derived redirect query rows remain literal until edited.
+- Header and query rows preserve order and duplicate names. Untouched query values retain literal provenance; editing restores normal template behavior. Serialization must never guess an undefined OpenAPI shape.
+- Response decoding is streamed with encoded and decoded caps around every supported decoder. Do not buffer a compressed body before applying limits. Unknown, malformed, or stacked content encodings stop processing with bounded safe diagnostics.
+- Save covers the whole collection. Dirty reordering changes the manifest. A deferred draft's body and test source are placeholders; any code that reads them must call `ensure_loaded`, and saving must hydrate every remaining deferred draft before building the write set.
+- Collection saves use recoverable atomic replacement, content-hash conflict detection, and cross-process transaction locking. Managed paths remain within the collection root. Preserve nested unknown fields and reject newer schema versions.
+- Response spools are application-owned and swept only after 24 hours because another Duckie process can still hold a Windows handle with delete sharing. Do not shorten this threshold without replacement ownership tracking.
+- OpenAPI acquisition counts attempted work and received bytes even when retrieval or parsing fails. Cache one result per resolved URI, share bytes used as both a document and an example, propagate cancellation and the common deadline, and rebase an external document's internal pointers into its embedded copy.
+- Authored and fetched example payloads are opaque data. Metadata recursion and generated placeholders remain depth, node, and byte bounded.
+- Fresh test workers are intentional. Each evaluation starts and stops its worker; do not retain one across runs or broaden its host API casually.
+- UI work stays off the network and file-I/O paths. Background work communicates through bounded channels and explicit repaint requests. Avoid unconditional frame loops, per-request worker threads, and repeated response-body copies.
+- Development screenshot and benchmark features must never ship. `scripts/package.ps1` checks their binary markers. Package only ordinary release builds.
+- egui 0.36 APIs differ from older examples: use `App::ui`, `Panel::top/left/bottom`, and `Context::run_ui`. Headless tests must clear unapplied `output.textures_delta`; `TextEdit::show` returns its response through `output.response.response`.
+
+## Open work
+
+The following items are unresolved. They are not authorization to begin unrelated work; the current task and owner direction still control scope.
+
+### Confirmed gaps and validation work
+
+- Full request chaining remains outside v1. If real usage justifies it, prefer declared response captures into run-scoped bindings over scripts mutating live environments. Preserve immutable snapshots, expose capture provenance, define missing-value behavior, and keep collection files unchanged during execution.
+- Accessibility and enterprise-network coverage are incomplete. Narrator, keyboard-only operation, 200% scaling, IME, remote desktop/display changes, corporate certificate chains, PAC/WPAD, and authenticated proxies are not certified.
+- Cold launch is owner-accepted but has no recorded p95. The 7.0 ms frame result measures CPU frame construction only, excluding upload, presentation, and compositor time. GUI memory measurements exclude test workers.
+- The latest source changes have not produced a newly validated release package. Before publishing, build from a tagged commit without development features, run the full checks, package it, validate the ZIP on a clean Windows x64 machine, and record a checksum and provenance.
+- The CLI needs a more discoverable front door: bare invocation and `--help`/`-h`/`--version` should succeed, help should name exit codes, and a sole environment could be inferred. Folder/name filtering remains a separate candidate.
+- `crates/duckie-desktop/src/ui.rs` remains a large mixed-responsibility module. Split coherent response, request, sidebar, and top-level view units only when doing adjacent work, preserving shared state and avoiding cosmetic churn.
+
+### Review candidates awaiting an owner decision
+
+These source-supported review ideas are retained for future evaluation, not accepted backlog:
+
+- Add Basic authentication inside the secret-binding model. Client certificates and OAuth client credentials require larger transport and chaining decisions; authorization-code/device flows conflict with the no-background-network contract unless explicitly user-initiated and short lived.
+- Make redirect policy visible and optionally configurable without forwarding authorization across origins. Consider an opt-in, inspectable, environment-scoped cookie jar only if session-cookie workflows justify the state and security surface.
+- Offer an external-editor action for managed body and test files, then keep the embedded editor limited to quick edits, line navigation, and find.
+- Explain JSON-tree fallback more directly and keep pointer/assertion workflows useful when the tree is unavailable. Do not add more tree features without a different parsing need.
+- Reassess standalone HTML reports and persisted comparison baselines if maintenance outweighs demonstrated use. JSON and JUnit have defined machine consumers; retained-response comparison remains useful for live inspection.
+- Avoid expanding bulk-edit syntax or cURL option coverage speculatively. Keep bulk editing as paste assistance and cURL conversion strict, with credential-redacted export as the default.
+- Improve limit labels or add coarse presets only where observed use shows that raw millisecond/byte fields cause mistakes. Runtime bounds remain mandatory even if presentation changes.
+
+Previously rejected QOL suggestions are closed unless new evidence changes the decision: session-history search, header-name completion, remembered file-dialog directories, adjacent-request shortcuts, inferred response filenames, title-bar dirty state, persistent sidebar result badges, drag-and-drop routing, and speculative response-clone optimization.
+
+## Performance measurement
+
+The accepted ceiling is below 500 MB for the desktop and active test worker together. The recorded measurements below used Windows 11 Pro 10.0.26200, Ryzen 7 5800X, GTX 1080 Ti, 125% scaling, the glow/OpenGL renderer, release builds outside a debugger, and deterministic fixtures. Launch milestones include loader time; peak memory uses Windows `PeakPagefileUsage`.
+
+Reproduce the benchmark suite with:
+
+```powershell
+node scripts/make-fixtures.mjs
+cargo build --workspace --release --features duckie-desktop/bench
+.\scripts\benchmark.ps1
+cargo test -p duckie-test-worker --release --test measurements -- --ignored --nocapture
+cargo test -p duckie-desktop --release -- --ignored --nocapture
+```
+
+Reuse byte-identical fixtures and the baseline named by each target. Collection restore is measured after the first usable frame, not from process start.
+
+| Measurement | Recorded result | Qualification |
+| --- | ---: | --- |
+| Warm launch to first frame, empty workspace, 30 trials | p95 167 ms | Target ≤ 300 ms; pass. |
+| Restored 1,000-request collection, first frame, 20 trials | p95 180 ms | Target ≤ 300 ms; pass. |
+| Restored collection searchable after first usable frame, 20 trials | p95 439 ms | Target ≤ 500 ms; pass. Earlier process-start comparisons were the wrong baseline. |
+| Empty idle private bytes | 94.0 MiB | Desktop only; inside revised ceiling. |
+| Idle CPU over 60 seconds | 0.0016% of machine | Pass. |
+| Frame construction under input | p95 7.0 ms | CPU-only lower bound, not full input-to-paint. |
+| Warm loopback request dispatch | p95 0.62 ms | Includes loopback round trip; pass. |
+| Cold test-worker overhead | p95 19 ms | 1 KiB response and trivial test; pass. |
+| 50 MiB response-memory delta | 3.8–25.0 MiB | Multi-line, long-line, compressed, binary, truncated, and slow-stream shapes; target ≤ 32 MiB. |
+| Cold launch | No figure | Post-reboot owner judgement only. |
+
+The 50 MiB response deltas were 3.8 MiB for multi-line text, 25.0 MiB for a single long line, 11.7 MiB for gzip, 4.1 MiB for binary, 3.9 MiB for a capped 60 MiB stream, and 14.4 MiB for a slow stream. Long-line layout was previously 213.7 MiB before adaptive 128 KiB preview pages.
+
+One manual 10,000-request comparison measured deferred body/test loading at about 8 MiB below eager loading (143.8 MiB versus 151.7 MiB peak). This was one trial per configuration and measures memory, not restore speed. One focused session-history trial measured a 25.05 MiB response delta; it was not the full multi-trial protocol.
+
+Glow was selected over wgpu after sampled idle private memory measured 94.0 MiB versus 374.3 MiB. The selected renderer was also confirmed in an Omnissa Horizon session. These figures are snapshots, not guarantees for other machines or drivers.
+
+## Contributor guide
+
+- Follow the user's current task. An open item or checkpoint does not authorize starting another task.
+- Inspect the working tree before editing and preserve unrelated changes. Keep work inside relevant crate boundaries and the local-only product contract.
+- Update this README instead of creating another status log, proposal, release report, agent instruction file, or duplicate backlog. Keep current behavior, durable decisions, open work, and reproducible measurement context; remove completed plans rather than accumulating a ledger.
+- Distinguish measurements, owner acceptance, review candidates, and hypotheses. Date validation snapshots and state what was not measured or rebuilt.
+- Use `rg` for repository searches. Prefer bounded background work and preserve deterministic behavior.
+- For documentation-only changes, verify accuracy, anchors, generated shortcut content, repository references, and the diff. Full application builds are usually unnecessary.
+
+Run the standard checks for code changes:
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+python scripts/generate-shortcuts.py --check
+```
+
+The Node-backed tests and fixture generator require Node.js on `PATH` and fail rather than silently skipping. Benchmark tests are intentionally ignored during ordinary workspace tests.
+
+The latest full validation was 22 September 2026: formatting, strict workspace Clippy, shortcut generation, and all 162 non-measurement workspace tests passed; four performance measurements remained ignored. Both Node-backed end-to-end tests passed. This did not rebuild or validate a release ZIP and did not rerun performance measurements.
 
 ## License
 

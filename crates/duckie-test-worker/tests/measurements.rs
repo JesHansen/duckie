@@ -1,4 +1,4 @@
-//! Measurements for the acceptance table in ARCHITECTURE.md that are cheapest to take in-process.
+//! Measurements for the acceptance table in README.md that are cheapest to take in-process.
 //!
 //! Ignored by default: these are timing runs, not assertions about behaviour, and they would add
 //! seconds to every `cargo test`. Take them with:
