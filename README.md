@@ -38,7 +38,9 @@ Duckie has no account, telemetry, update checks, cloud service, or automatic bac
 
 ## Run Duckie
 
-Duckie currently builds from source on Windows x64. You need Rust 1.95 or newer with the MSVC toolchain, plus Visual Studio C++ Build Tools and the Windows SDK.
+Download the portable Windows x64 ZIP from [GitHub Releases](../../releases), extract it, and run `duckie.exe`. Each release lists the ZIP's SHA-256 checksum and carries a GitHub build-provenance attestation.
+
+To build from source on Windows x64, you need Rust 1.95 or newer with the MSVC toolchain, plus Visual Studio C++ Build Tools and the Windows SDK.
 
 ```powershell
 cargo build --workspace --release
@@ -347,6 +349,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 python scripts/generate-shortcuts.py --check
 ```
+
+To publish a release, bump `version` under `[workspace.package]` in `Cargo.toml`, push it to `main`, and run the **Release** workflow from the Actions tab. It builds the current head of `main`, runs the standard checks, packages with `scripts/package.ps1`, and creates tag `v<version>` with the ZIP, a `.sha256` file, and a provenance attestation. It refuses to run if that tag already exists. It does not validate the ZIP on a clean machine.
 
 The Node-backed tests and fixture generator require Node.js on `PATH` and fail rather than silently skipping. Benchmark tests are intentionally ignored during ordinary workspace tests.
 
